@@ -198,5 +198,4 @@ authRouter.post('/logout', async (req, res): Promise<any> => {
   })
 })
 
-
 export default authRouter

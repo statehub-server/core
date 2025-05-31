@@ -2,8 +2,9 @@ import { fork, ChildProcess } from 'child_process'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
+import crypto from 'crypto'
 import { Router } from 'express'
-import { log, warn, error } from '../logger'
+import { log, warn, error, fatal } from '../logger'
 
 const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
 const modules = new Map<string, ChildProcess>()
@@ -77,14 +78,7 @@ export function loadModule(modulePath: string) {
     modules.delete(manifest.name)
   })
 
-  subprocess.on('message', msg => {
-    const { type, payload } = msg as any
-
-    if (type === 'register')
-      registerModuleEndpoints(manifest.name, payload)
-    else
-      log(`Message from ${manifest.name}: ${JSON.stringify(msg)}`)
-  })
+  subprocess.on('message', msg => handleModuleMessage(msg, manifest.name))
 
   subprocess.send?.({
     type: 'init',
@@ -95,6 +89,31 @@ export function loadModule(modulePath: string) {
 
   modules.set(manifest.name, subprocess)
   log(`Module "${manifest.name}" loaded.`)
+}
+
+function handleModuleMessage(
+  msg: any,
+  moduleName: string
+) {
+  const { type, payload, level, message, id } = msg
+
+  switch (type) {
+  case 'register':
+    registerModuleEndpoints(moduleName, payload)
+    break
+
+  case 'log':
+    switch (level) {
+    case 'fatal': fatal(message, moduleName); break
+    case 'error': error(message, moduleName); break
+    case 'warning': warn(message, moduleName); break
+    default: log(message, level || 'info', moduleName)
+    }
+    break
+
+  default:
+    log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
+  }
 }
 
 function registerModuleEndpoints(name: string, payload: any) {
@@ -126,7 +145,10 @@ function registerModuleEndpoints(name: string, payload: any) {
         id: requestId,
         handlerId: handlerId,
         payload: {
-          req: req,
+          query: req.query,
+          params: req.params,
+          body: req.body,
+          headers: req.headers,
           // user: auth ? req.user : undefined
         }
       })

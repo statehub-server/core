@@ -7,7 +7,7 @@ import 'dotenv/config'
 import { log } from './logger'
 import { exitIfDbConnectionFailed, migrateDb } from './db/db' 
 import authRouter from './routes/auth'
-import { loadAllModules } from './modules/modloader'
+import { loadAllModules, onRegisterModuleNamespaceRouter } from './modules/modloader'
 
 const app = express()
 const server = http.createServer(app)
@@ -42,6 +42,9 @@ wss.on('connection', (ws) => {
 })
 
 app.use('/auth', authRouter)
+onRegisterModuleNamespaceRouter((namespace, router) => {
+  app.use(`/${namespace}`, router)
+})
 
 exitIfDbConnectionFailed()
 migrateDb()
