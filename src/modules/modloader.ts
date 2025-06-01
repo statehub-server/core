@@ -7,7 +7,13 @@ import { Router } from 'express'
 import { log, warn, error, fatal } from '../logger'
 
 const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
-const modules = new Map<string, ChildProcess>()
+export const modules = new Map<string, ChildProcess>()
+export const wsCommandRegistry = new Map<string, {
+  moduleName: string
+  handlerId: string
+  broadcast: boolean
+  auth: boolean
+}>()
 
 interface ModuleManifest {
   name: string
@@ -112,7 +118,8 @@ function handleModuleMessage(
     break
 
   default:
-    log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
+    // log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
+    break
   }
 }
 
@@ -152,6 +159,16 @@ function registerModuleEndpoints(name: string, payload: any) {
           // user: auth ? req.user : undefined
         }
       })
+    })
+  }
+
+  for (const cmd of commands) {
+    const { command, handlerId, broadcast = false, auth = false } = cmd
+    wsCommandRegistry.set(`${name}.${command}`, {
+      moduleName: name,
+      handlerId,
+      broadcast,
+      auth
     })
   }
 
