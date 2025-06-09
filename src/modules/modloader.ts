@@ -5,6 +5,7 @@ import os from 'os'
 import crypto from 'crypto'
 import { Router } from 'express'
 import { log, warn, error, fatal } from '../logger'
+import { authMiddleware } from '../routes/auth'
 
 const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
 export const modules = new Map<string, ChildProcess>()
@@ -132,6 +133,8 @@ function registerModuleEndpoints(name: string, payload: any) {
 
   const router = Router()
 
+  router.use((req, res, next) => authMiddleware(req, res, next))
+
   for(const route of routes || []) {
     const { method, path, handlerId, auth } = route
 
@@ -156,7 +159,7 @@ function registerModuleEndpoints(name: string, payload: any) {
           params: req.params,
           body: req.body,
           headers: req.headers,
-          // user: auth ? req.user : undefined
+          user: auth ? req.user : undefined
         }
       })
     })

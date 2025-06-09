@@ -11,3 +11,19 @@ CREATE TABLE IF NOT EXISTS users(
     lastToken TEXT,
     createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+INSERT INTO USERS (
+    username,
+    email,
+    passwordHash,
+    passwordSalt,
+    lastIp,
+    roles
+) VAlUES (
+    'admin',
+    '',
+    'ff919038ba8e6fec9ef9dbd4e60b7d7721230ad651ee589e94598bad1916fb29f288d202fe01b2447ed8b635b9e69237e2c50460ce9bcad7bb4cca0a675bc3af',
+    'ZNjbdEu5HjUQhnEUNQxPXSR/1mX8vBWluAAYzFOWxhK87xTxVu3XHPGDOlBzu4IQgb9+WoiWhf+/ITM64Toq0A==',
+    '127.0.0.1',
+    'superuser'
+) ON CONFLICT(username) DO NOTHING;

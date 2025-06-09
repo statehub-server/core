@@ -21,6 +21,35 @@ import {
 
 const authRouter = Router()
 
+export async function authMiddleware(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const token = req.header('Authorization')?.split(' ')[1] ?? ''
+  const secretKey = process.env.SECRET_KEY || ''
+
+  if (!token)
+    return next()
+  
+  verify(token, secretKey, async (err) => {
+    if (err)
+      return next()
+
+    const user = await userByToken(token)
+    if (!user)
+      return next()
+
+    ;(req as any).user = {
+      ...user,
+      passwordhash: undefined,
+      passwordsalt: undefined,
+      lastip: undefined,
+    }
+    next()
+  })
+}
+
 authRouter.post('/verify', (req, res) : any => {
   const token = req.header('Authorization')?.split(' ')[1] || ''
   const secretKey = process.env.SECRET_KEY || ''
@@ -28,24 +57,24 @@ authRouter.post('/verify', (req, res) : any => {
     error: 'invalidToken',
     text: 'Invalid authorization token'
   }
-
+  
   if (!token)
     return res.status(401).json(noAccess)
   
-  verify(token, secretKey, err => {
+  verify(token, secretKey, async (err) => {
     if (err)
       return res.status(401).json(noAccess)
-
-    const user = userByToken(token)
+    
+    const user = await userByToken(token)
     if (!user)
       return res.status(401).json(noAccess)
-
+    
     return res.json({
       ok: true,
       ...user,
-      passwordHash: undefined,
-      passwordSalt: undefined,
-      lastIp: undefined,
+      passwordhash: undefined,
+      passwordsalt: undefined,
+      lastip: undefined,
     })
   })
 })
@@ -53,57 +82,57 @@ authRouter.post('/verify', (req, res) : any => {
 authRouter.post('/login', async (req, res): Promise<any> => {
   const { username, password } = req.body
   const ip = typeof req.headers['x-forwarded-for'] === 'string'
-    ? req.headers['x-forwarded-for'].split(',')[0]
-    : req.socket.remoteAddress ?? ''
+  ? req.headers['x-forwarded-for'].split(',')[0]
+  : req.socket.remoteAddress ?? ''
   const secretKey = process.env.SECRET_KEY || ''
-
+  
   if (!username || !password) {
     return res.status(400).json({
       error: 'missingCredentials',
-      text: 'Username and password are required.'
+      text: 'Username and password are required'
     })
   }
-
+  
   const user = await userByName(username)
-  if (!user || !user.passwordHash || !user.passwordSalt) {
+  if (!user || !user.passwordhash || !user.passwordsalt) {
     return res.status(401).json({
       error: 'invalidCredentials',
-      text: 'Invalid username or password.'
+      text: `Invalid username or password`
     })
   }
-
+  
   const attemptedHash = crypto.pbkdf2Sync(
     password,
-    user.passwordSalt,
+    user.passwordsalt,
     300000,
     64,
     'sha512'
   ).toString('hex')
-
-  if (attemptedHash !== user.passwordHash) {
+  
+  if (attemptedHash !== user.passwordhash) {
     return res.status(401).json({
       error: 'invalidCredentials',
       text: 'Invalid username or password'
     })
   }
-
+  
   const payload = {
     username: user.username,
     ip: ip,
   }
   const token = sign(payload, secretKey, { expiresIn: '12h' })
-
+  
   await updateUserLogin(user.username, token, ip)
-
+  
   return res.json({
     ok: true,
     text: `Successfully logged in as ${username}`,
     user: {
       ...user,
       token: token,
-      passwordHash: undefined,
-      passwordSalt: undefined,
-      lastIp: undefined,
+      passwordhash: undefined,
+      passwordsalt: undefined,
+      lastip: undefined,
     }
   })
 })
@@ -114,7 +143,7 @@ authRouter.post('/register', async (req, res): Promise<any> => {
   ? req.headers['x-forwarded-for'].split(',')[0]
   : req.socket.remoteAddress ?? ''
   const secretKey = process.env.SECRET_KEY || ''
-
+  
   const errorMessages = {
     usernameMissing: 'Invalid username',
     passwordMissing: 'Password is missing',
@@ -138,16 +167,16 @@ authRouter.post('/register', async (req, res): Promise<any> => {
     () => Promise.resolve(validatePasswordMatch(password, repassword)),
     validateEmailNotTaken(email)
   ]
-
+  
   for (const validator of validators) {
     const result = await validator()
     if ('error' in result)
       return res.status(400).json({
-        error: result.error,
-        text: errorMessages[result.error]
-      })
+      error: result.error,
+      text: errorMessages[result.error]
+    })
   }
-
+  
   const tmpUser = {
     username: username,
     password: password,
@@ -159,7 +188,7 @@ authRouter.post('/register', async (req, res): Promise<any> => {
     ...tmpUser,
     token: token
   }
-
+  
   await createUserAccount(user)
   return res.json({
     ok: true,
@@ -171,27 +200,27 @@ authRouter.post('/register', async (req, res): Promise<any> => {
 authRouter.post('/logout', async (req, res): Promise<any> => {
   const token = req.header('Authorization')?.split(' ')[1] || ''
   const ip = typeof req.headers['x-forwarded-for'] === 'string'
-    ? req.headers['x-forwarded-for'].split(',')[0]
-    : req.socket.remoteAddress ?? ''
-
+  ? req.headers['x-forwarded-for'].split(',')[0]
+  : req.socket.remoteAddress ?? ''
+  
   if (!token) {
     return res.status(401).json({
       error: 'missingToken',
       text: 'Authorization token is required'
     })
   }
-
+  
   const user = await userByToken(token)
-
+  
   if (!user) {
     return res.status(401).json({
       error: 'invalidToken',
       text: 'Invalid or expired token'
     })
   }
-
+  
   await updateUserLogin(user.username, '', ip)
-
+  
   return res.json({
     ok: true,
     text: 'Successfully logged out'

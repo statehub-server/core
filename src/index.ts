@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import cors from 'cors'
 import bodyParser from 'body-parser'
 import crypto from 'crypto'
+import { verify } from 'jsonwebtoken'
 import 'dotenv/config'
 import { log, warn } from './logger'
 import { exitIfDbConnectionFailed, migrateDb } from './db/db' 
@@ -15,12 +16,12 @@ import {
   wsCommandRegistry
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
+import { userByToken } from './db/auth'
 
 const app = express()
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server })
 const wsOnlineClients = new Set<IdentifiedWebSocket>()
-const wsPendingRequests = new Map<string, { ws: WebSocket }>()
 
 const originWhitelist = process.env.ORIGIN_WHITELIST?.split(',') || [] as string[]
 app.use(cors({
@@ -40,40 +41,65 @@ onRegisterModuleNamespaceRouter((namespace, router) => {
 wss.on('connection', (ws) => {
   const client = ws as IdentifiedWebSocket
   client.id = crypto.randomUUID()
-  client.isLoggedIn = false
   wsOnlineClients.add(client)
   log(`New client connected (id=${client.id})`)
-
-  ws.on('message', (message) => {
+  
+  ws.on('message', async (message) => {
     try {
       const data = JSON.parse(message.toString())
-      const { command, payload = {}, id = crypto.randomUUID() } = data
+      const {
+        command,
+        payload = {},
+        id = crypto.randomUUID(),
+        token = null
+      } = data
+
+      if (typeof data.command !== 'string' || !data.payload)
+        return
+
       const moduleName = command.split('.')[0]
       const handler = wsCommandRegistry.get(command)
       const subprocess = modules.get(moduleName)
+      const secretKey = process.env.SECRET_KEY || ''
+      if (payload.user)
+        payload.user = undefined
+
+      if (token) {
+        try {
+          verify(token, secretKey)
+          const user = await userByToken(token)
+          if (!user)
+            return
+
+          payload.user = {
+            ...user,
+            passwordhash: undefined,
+            passwordsalt: undefined,
+            lastip: undefined,
+          }
+        } catch(e) {}
+      }
       
       if (!handler || !modules.get(moduleName))
         return
-
+      
       const onMessage = (msg: any) => {
         if (msg.type === 'response' && msg.id === id) {
           subprocess?.off('message', onMessage)
-
+          
           const response = JSON.stringify({ id: id, payload: msg.payload })
           if (handler.broadcast) {
-            for (const otherClient of wsOnlineClients) {
-              if (otherClient.readyState === ws.OPEN) {
+            for (const otherClient of wsOnlineClients)
+              if (otherClient.readyState === ws.OPEN)
                 otherClient.send(response)
-              }
-            }
           } else {
             ws.send(response)
           }
         }
       }
-
+      
       subprocess?.on('message', onMessage)
-
+      
       subprocess?.send({
         type: 'invoke',
         id: id,
@@ -84,7 +110,7 @@ wss.on('connection', (ws) => {
       warn(`Malformed request received (invalid json)`)
     }
   }) 
-
+  
   ws.on('close', () => {
     log(`Client ${client.id} disconnected`)
     wsOnlineClients.delete(client)
