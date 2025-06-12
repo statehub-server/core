@@ -144,7 +144,12 @@ function registerModuleEndpoints(name: string, payload: any) {
       const onMessage = (msg: any) => {
         if (msg.type === 'response' && msg.id === requestId) {
           subprocess.off('message', onMessage)
-          res.status(msg.status || 200).json(msg.payload)
+          if (msg.contentType) {
+            res.setHeader('Content-Type', msg.contentType)
+            res.status(msg.status || 200).send(msg.payload)
+          } else {
+            res.status(msg.status || 200).json(msg.payload)
+          }
         }
       }
 
