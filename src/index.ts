@@ -54,7 +54,7 @@ wss.on('connection', (ws) => {
         token = null
       } = data
 
-      if (typeof data.command !== 'string' || !data.payload)
+      if (typeof data.command !== 'string')
         return
 
       const moduleName = command.split('.')[0]
