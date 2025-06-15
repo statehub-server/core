@@ -37,21 +37,21 @@ export function onRegisterModuleNamespaceRouter(
 
 export function loadAllModules() {
   log('Begin loading server modules')
-
+  
   if (!fs.existsSync(modulesDir)) {
     warn('No modules directory found, creating one...')
     fs.mkdirSync(modulesDir)
     return
   }
-
+  
   const moduleDirs = fs.readdirSync(modulesDir, { withFileTypes: true })
-    .filter(dirent => dirent.isDirectory())
-
+  .filter(dirent => dirent.isDirectory())
+  
   if (!moduleDirs.length) {
     log('No modules found.')
     return
   }
-
+  
   for (const dirent of moduleDirs) {
     const modulePath = path.join(modulesDir, dirent.name)
     loadModule(modulePath)
@@ -65,35 +65,44 @@ export function loadModule(modulePath: string) {
     warn(`Skipping ${modulePath}: No manifest.json found.`)
     return
   }
-
+  
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as ModuleManifest
   const entryFile = manifest.entryPoint || 'dist/index.js'
   const entryPath = path.join(modulePath, entryFile)
-
+  
   if (!fs.existsSync(entryPath)) {
     warn(`Skipping ${manifest.name}: Entry file ${entryFile} not found.`)
     return
   }
-
+  
   const subprocess = fork(entryPath, [], {
     cwd: modulePath,
     stdio: ['pipe', 'pipe', 'pipe', 'ipc']
   })
-
-  subprocess.on('exit', code => {
-    log(`Module "${manifest.name}" exited with code ${code}`)
+  
+  const cleanup = (reason: string) => {
+    log(`Module ${manifest.name} unloaded (reason: ${reason})`,)
     modules.delete(manifest.name)
-  })
-
+    
+    for (const key of wsCommandRegistry.keys())
+      if (key.startsWith(`${manifest.name}.`))
+        wsCommandRegistry.delete(key)
+  }
+  
+  subprocess.on('exit', code => cleanup(`exited with error code ${code}`))
+  subprocess.on('close', code => cleanup(`exited with error code ${code}`))
+  subprocess.on('error', error => cleanup(`an error occurred "${error.message}"`))
+  subprocess.on('disconnect', () => cleanup('disconnected'))
+  
   subprocess.on('message', msg => handleModuleMessage(msg, manifest.name))
-
+  
   subprocess.send?.({
     type: 'init',
     payload: {
       pgUrl: process.env.PG_URL,
     }
   })
-
+  
   modules.set(manifest.name, subprocess)
   log(`Module "${manifest.name}" loaded.`)
 }
@@ -103,22 +112,22 @@ function handleModuleMessage(
   moduleName: string
 ) {
   const { type, payload, level, message, id } = msg
-
+  
   switch (type) {
-  case 'register':
+    case 'register':
     registerModuleEndpoints(moduleName, payload)
     break
-
-  case 'log':
+    
+    case 'log':
     switch (level) {
-    case 'fatal': fatal(message, moduleName); break
-    case 'error': error(message, moduleName); break
-    case 'warning': warn(message, moduleName); break
-    default: log(message, level || 'info', moduleName)
+      case 'fatal': fatal(message, moduleName); break
+      case 'error': error(message, moduleName); break
+      case 'warning': warn(message, moduleName); break
+      default: log(message, level || 'info', moduleName)
     }
     break
-
-  default:
+    
+    default:
     // log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
     break
   }
@@ -127,21 +136,37 @@ function handleModuleMessage(
 function registerModuleEndpoints(name: string, payload: any) {
   const { routes, commands } = payload
   const subprocess = modules.get(name)
-
+  
   if (!subprocess)
     return
-
+  
   const router = Router()
-
+  
   router.use((req, res, next) => authMiddleware(req, res, next))
-
+  
   for(const route of routes || []) {
     const { method, path, handlerId, auth } = route
-
+    
     router[method](path, async (req, res) => {
       const requestId = crypto.randomUUID()
+      const isMultipart = (req.headers['Content-Type'] || '')
+        .includes('multipart/form-data')
+      const timeoutMs = isMultipart ? 30_000 : 5_000 
+      
+      if (!subprocess || subprocess.killed) {
+        return res.status(503).json({
+          error: 'Module service unavailable',
+          module: name
+        })
+      }
 
+      const timeout = setTimeout(() => {
+        subprocess.off('message', onMessage)
+        res.status(504).json({ error: 'timeout' })
+      }, timeoutMs)
+      
       const onMessage = (msg: any) => {
+        clearTimeout(timeout)
         if (msg.type === 'response' && msg.id === requestId) {
           subprocess.off('message', onMessage)
           if (msg.contentType) {
@@ -152,9 +177,9 @@ function registerModuleEndpoints(name: string, payload: any) {
           }
         }
       }
-
+      
       subprocess.on('message', onMessage)
-
+      
       subprocess.send({
         type: 'invoke',
         id: requestId,
@@ -169,7 +194,7 @@ function registerModuleEndpoints(name: string, payload: any) {
       })
     })
   }
-
+  
   for (const cmd of commands) {
     const { command, handlerId, broadcast = false, auth = false } = cmd
     wsCommandRegistry.set(`${name}.${command}`, {
@@ -179,7 +204,7 @@ function registerModuleEndpoints(name: string, payload: any) {
       auth
     })
   }
-
+  
   if (onRegisterRouter)
     onRegisterRouter(name, router)
 }

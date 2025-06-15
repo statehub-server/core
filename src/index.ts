@@ -30,8 +30,8 @@ app.use(cors({
     callback(null, whitelisted)
   }
 }))
-app.use(bodyParser.urlencoded({ extended: true, limit: '2mb' }))
-app.use(express.json({ limit: '2mb' }))
+app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
+app.use(express.json({ limit: '8mb' }))
 
 app.use('/auth', authRouter)
 onRegisterModuleNamespaceRouter((namespace, router) => {
