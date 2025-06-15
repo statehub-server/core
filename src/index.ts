@@ -88,7 +88,7 @@ wss.on('connection', (ws) => {
           subprocess?.off('message', onMessage)
           
           const response = JSON.stringify({ id: id, payload: msg.payload })
-          if (handler.broadcast) {
+          if (handler.broadcast && !msg.payload.onlyReplyToSender) {
             for (const otherClient of wsOnlineClients)
               if (otherClient.readyState === ws.OPEN)
                 otherClient.send(response)
