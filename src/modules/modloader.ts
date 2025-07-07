@@ -7,15 +7,6 @@ import { Router } from 'express'
 import { log, warn, error, fatal } from '../logger'
 import { authMiddleware } from '../routes/auth'
 
-const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
-export const modules = new Map<string, ChildProcess>()
-export const wsCommandRegistry = new Map<string, {
-  moduleName: string
-  handlerId: string
-  broadcast: boolean
-  auth: boolean
-}>()
-
 interface ModuleManifest {
   name: string
   description?: string
@@ -24,7 +15,19 @@ interface ModuleManifest {
   license?: string
   entryPoint?: string
   repo?: string
+  dependencies?: string[]
+  path?: string
 }
+
+const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
+export const modules = new Map<string, ChildProcess>()
+export const wsCommandRegistry = new Map<string, {
+  moduleName: string
+  handlerId: string
+  broadcast: boolean
+  auth: boolean
+}>()
+export const manifests = new Map<string, ModuleManifest>()
 
 let onRegisterRouter:
 ((namespace: string, router: Router) => void) | null = null
@@ -54,9 +57,68 @@ export function loadAllModules() {
   
   for (const dirent of moduleDirs) {
     const modulePath = path.join(modulesDir, dirent.name)
-    loadModule(modulePath)
+    const manifestPath = path.join(modulePath, 'manifest.json')
+    
+    if (!fs.existsSync(manifestPath))
+      continue
+
+    const rawManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as ModuleManifest
+    const manifest = { ...rawManifest, path: modulePath }
+    manifests.set(manifest.name, manifest)
   }
-  log(`Loaded ${moduleDirs.length} module(s).`)
+
+  const { sorted, skipped } = dependencyTopologicalSort()
+
+  for (const name of sorted) {
+    const path = manifests.get(name)?.path || ''
+    loadModule(path)
+  }
+
+  log(`Module loader: ${ sorted.length } module(s) loaded, ${skipped.length} failed.`)
+}
+
+function dependencyTopologicalSort() {
+  const sorted: string[] = []
+  const skipped: string[] = []
+  const visited = new Set<string>()
+  const temp = new Set<string>()
+
+  log('Resolving dependencies')
+
+  const visit = (name: string) => {
+    if (temp.has(name)) {
+      error(`Circular dependency detected: ${name}`)
+      process.exit(1)
+    }
+
+    if (!visited.has(name)) {
+      temp.add(name)
+      const mod = manifests.get(name)
+
+      if (!mod) {
+        error(`Missing module manifest: ${name}`)
+        process.exit(1)
+      }
+
+      for (const dep of mod.dependencies || []) {
+        if (!manifests.has(dep)) {
+          warn(`Dependency ${dep} for ${name} not found, skipping...`)
+          skipped.push(name)
+          return
+        }
+
+        visit(dep)
+      }
+      temp.delete(name)
+      visited.add(name)
+      sorted.push(name)
+    }
+  }
+
+  for (const name of manifests.keys())
+    visit(name)
+
+  return { sorted, skipped }
 }
 
 export function loadModule(modulePath: string) {
@@ -115,7 +177,7 @@ function handleModuleMessage(
   
   switch (type) {
     case 'register':
-    registerModuleEndpoints(moduleName, payload)
+      registerModuleEndpoints(moduleName, payload)
     break
     
     case 'log':
@@ -145,8 +207,10 @@ function registerModuleEndpoints(name: string, payload: any) {
   router.use((req, res, next) => authMiddleware(req, res, next))
   
   for(const route of routes || []) {
-    const { method, path, handlerId, auth } = route
-    
+    const { rawMethod, path, handlerId, auth } = route
+    const method = ['get', 'post', 'delete', 'put']
+      .includes(rawMethod)? rawMethod : 'get'
+
     router[method](path, async (req, res) => {
       const requestId = crypto.randomUUID()
       const isMultipart = (req.headers['Content-Type'] || '')

@@ -13,9 +13,9 @@ export const fatal = (
 export const error = (
   message: string,
   module: string = 'core'
-) => log(message, 'error', module, console.error)
+) => log(message, 'error', module)
 
 export const warn = (
   message: string,
   module: string = 'core'
-) => log(message, 'warning', module, console.warn)
+) => log(message, 'warning', module)

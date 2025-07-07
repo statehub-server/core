@@ -57,7 +57,9 @@ wss.on('connection', (ws) => {
       if (typeof data.command !== 'string')
         return
 
-      const moduleName = command.split('.')[0]
+      const moduleName = command.startsWith('@')
+        ? command.split('.').slice(0, 2).join('.')
+        : command.split('.')[0]
       const handler = wsCommandRegistry.get(command)
       const subprocess = modules.get(moduleName)
       const secretKey = process.env.SECRET_KEY || ''
