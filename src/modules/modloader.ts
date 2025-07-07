@@ -173,25 +173,38 @@ function handleModuleMessage(
   msg: any,
   moduleName: string
 ) {
-  const { type, payload, level, message, id } = msg
+  const { type, payload, level, message, id, to, isResult } = msg
   
   switch (type) {
     case 'register':
       registerModuleEndpoints(moduleName, payload)
-    break
+      break
     
     case 'log':
-    switch (level) {
-      case 'fatal': fatal(message, moduleName); break
-      case 'error': error(message, moduleName); break
-      case 'warning': warn(message, moduleName); break
-      default: log(message, level || 'info', moduleName)
-    }
-    break
+      switch (level) {
+        case 'fatal': fatal(message, moduleName); break
+        case 'error': error(message, moduleName); break
+        case 'warning': warn(message, moduleName); break
+        default: log(message, level || 'info', moduleName)
+      }
+      break
     
+    case 'intermoduleMessage':
+      const target = modules[to]
+      if (!target)
+        return
+
+      target.send?.({
+        type: isResult? 'mpcResponse' : 'mpcRequest',
+        id,
+        payload
+      })
+
+      break
+
     default:
-    // log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
-    break
+      // log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
+      break
   }
 }
 
