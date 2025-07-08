@@ -17,11 +17,30 @@ import {
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
+import {
+  crashedMessage,
+  initializationMessage
+} from './utils/prettyprints'
 
 const app = express()
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server })
 const wsOnlineClients = new Set<IdentifiedWebSocket>()
+
+initializationMessage()
+
+process.on('exit', code => {
+  wsOnlineClients.forEach((client) =>
+    client.close(1000, JSON.stringify({
+      reason: 'Server closed.'
+    })
+  ))
+
+  if (code !== 0)
+    crashedMessage(code)
+  else
+    log('Shutting down gracefully')
+})
 
 const originWhitelist = process.env.ORIGIN_WHITELIST?.split(',') || [] as string[]
 app.use(cors({

@@ -24,6 +24,7 @@ export function migrateDb() {
       process.exit(1)
     }
 
+    log('Running migration')
     sql.unsafe(data)
       .then(result => {
         log('Database ok')

@@ -1,5 +1,6 @@
 import * as crypto from 'crypto'
 import { sql } from './db'
+import { log } from '../logger'
 
 export type NewUser = {
   username: string,
@@ -10,38 +11,58 @@ export type NewUser = {
 }
 
 export function userByName(username: string) : Promise<any> {
-  return sql`select * from users
-    where username=${ username }`
+  return sql`
+    select u.*, json_agg(up.permission) as permissions
+    from users u
+    left join userPermissions up on u.id = up.userId
+    where u.username = ${username}
+    group by u.id;
+  `
     .then(result => result[0] || null)
-    .catch(err => null)
+    .catch(err => log('Database error! -- Unable to read user by name.'))
 }
 
 export function userById(id: string) : Promise<any> {
-  return sql`select * from users
-    where id=${ id }`
+  return sql`
+    select u.*, json_agg(up.permission) as permissions
+    from users u
+    left join userPermissions up on u.id = up.userId
+    where u.id = ${id}
+    group by u.id;
+  `
     .then(result => result[0] || null)
-    .catch(err => null)
+    .catch(err => log('Database error! -- Unable to read user by ID.'))
 }
 
 export function userByEmail(email: string) : Promise<any> {
-  return sql`select * from users
-    where email=${ email }`
+  return sql`
+    select u.*, json_agg(up.permission) as permissions
+    from users u
+    left join userPermissions up on u.id = up.userId
+    where u.email = ${email}
+    group by u.id;
+  `
     .then(result => result[0] || null)
-    .catch(err => null)
+    .catch(err => log('Database error! -- Unable to read user by email.'))
 }
 
 export function userByToken(token: string) : Promise<any> {
-  return sql`select * from users
-    where lastToken=${ token }`
+  return sql`
+    select u.*, json_agg(up.permission) as permissions
+    from users u
+    left join userPermissions up on u.id = up.userId
+    where u.lastToken = ${token}
+    group by u.id;
+  `
     .then(result => result[0] || null)
-    .catch(err => null)
+    .catch(err => log('Database error! -- Unable to read user by token.'))
 }
 
 export function isEmailTaken(email: string) : Promise<any> {
   return sql`select * from users
     where email=${ email }`
     .then(result => result[0]?.email === email ? true : false)
-    .catch(err => false)
+    .catch(err => log('Database error! -- Unable to check if email is taken.'))
 }
 
 export async function createUserAccount(user: NewUser) : Promise<any> {
@@ -51,12 +72,12 @@ export async function createUserAccount(user: NewUser) : Promise<any> {
   ).toString('hex')
 
   return sql`insert into users
-    (username, email, passwordHash, passwordSalt, lastIp, perms, lastToken)
+    (username, email, passwordHash, passwordSalt, lastIp, lastToken)
     values
     (${ user.username }, ${ user.email }, ${ passwordHash },
-    ${ passwordSalt }, ${ user.ip }, 'player', ${ user.token })`
+    ${ passwordSalt }, ${ user.ip }, ${ user.token })`
     .then(result => result[0] || null)
-    .catch(err => null)
+    .catch(err => log('Database error! -- Unable to insert user'))
 }
 
 export async function updateUserLogin(

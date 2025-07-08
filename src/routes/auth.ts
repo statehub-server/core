@@ -152,7 +152,9 @@ authRouter.post('/register', async (req, res): Promise<any> => {
     invalidEmail: 'Invalid email address',
     passwordsDontMatch: 'Passwords don\'t match',
     invalidUsernameFormat: 'Username must contain only letters, numbers, and underscores',
-    invalidUsernameLength: 'The username must be between 3 and 20 characters long'
+    invalidUsernameLength: 'The username must be between 3 and 20 characters long',
+    usernameTaken: 'Username already taken',
+    emailTaken: 'Email address already in use'
   }
   
   const validators: Validator[] = [
