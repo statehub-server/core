@@ -23,6 +23,15 @@ CREATE TABLE IF NOT EXISTS userPermissions(
         ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS oauthIdentities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  userId UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL,
+  providerId TEXT NOT NULL,
+  createdAt TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(provider, providerId)
+);
+
 INSERT INTO users(
     username,
     email,

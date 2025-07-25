@@ -9,6 +9,7 @@ import 'dotenv/config'
 import { log, warn } from './logger'
 import { exitIfDbConnectionFailed, migrateDb } from './db/db' 
 import authRouter from './routes/auth'
+import oauth2Router from './routes/oauth2'
 import {
   modules,
   loadAllModules,
@@ -53,6 +54,7 @@ app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
 app.use(express.json({ limit: '8mb' }))
 
 app.use('/auth', authRouter)
+app.use('/oauth', oauth2Router)
 onRegisterModuleNamespaceRouter((namespace, router) => {
   app.use(`/${namespace}`, router)
 })

@@ -7,7 +7,7 @@ export type NewUser = {
   email: string,
   password: string,
   ip: string,
-  token: string
+  token?: string
 }
 
 export function userByName(username: string) : Promise<any> {
@@ -75,7 +75,7 @@ export async function createUserAccount(user: NewUser) : Promise<any> {
     (username, email, passwordHash, passwordSalt, lastIp, lastToken)
     values
     (${ user.username }, ${ user.email }, ${ passwordHash },
-    ${ passwordSalt }, ${ user.ip }, ${ user.token })`
+    ${ passwordSalt }, ${ user.ip }, ${ user.token ?? '' })`
     .then(result => result[0] || null)
     .catch(err => log('Database error! -- Unable to insert user'))
 }
