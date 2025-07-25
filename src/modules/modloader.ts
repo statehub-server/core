@@ -6,6 +6,7 @@ import crypto from 'crypto'
 import { Router } from 'express'
 import { log, warn, error, fatal } from '../logger'
 import { authMiddleware } from '../routes/auth'
+import { sql } from '../db/db'
 
 interface ModuleManifest {
   name: string
@@ -160,9 +161,7 @@ export function loadModule(modulePath: string) {
   
   subprocess.send?.({
     type: 'init',
-    payload: {
-      pgUrl: process.env.PG_URL,
-    }
+    payload: null
   })
   
   modules.set(manifest.name, subprocess)
@@ -199,7 +198,32 @@ function handleModuleMessage(
         id,
         payload
       })
+      break
 
+    case 'databaseQuery':
+      if (!id) {
+        error('Database query requires message id', moduleName)
+        return
+      }
+      
+      sql.unsafe(payload)
+        .then(result => {
+          const mod = modules.get(moduleName)
+          mod?.send?.({
+            type: 'databaseResult',
+            id,
+            payload: result
+          })
+        })
+        .catch(err => {
+          error(`Database query error: ${err.message}`, moduleName)
+          const mod = modules.get(moduleName)
+          mod?.send?.({
+            type: 'databaseError',
+            id,
+            payload: err.message
+          })
+        })
       break
 
     default:
