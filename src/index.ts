@@ -14,7 +14,8 @@ import {
   modules,
   loadAllModules,
   onRegisterModuleNamespaceRouter,
-  wsCommandRegistry
+  wsCommandRegistry,
+  getModuleInstance
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
@@ -82,7 +83,6 @@ wss.on('connection', (ws) => {
         ? command.split('.').slice(0, 2).join('.')
         : command.split('.')[0]
       const handler = wsCommandRegistry.get(command)
-      const subprocess = modules.get(moduleName)
       const secretKey = process.env.SECRET_KEY || ''
       if (payload.user)
         payload.user = undefined
@@ -106,9 +106,24 @@ wss.on('connection', (ws) => {
       if (!handler || !modules.get(moduleName))
         return
       
+      // Determine sharding key for routing
+      let shardKey: string | undefined
+      if (command.startsWith('@')) {
+        shardKey = command.split('.')[0]
+      } else if (payload.user?.id) {
+        shardKey = payload.user.id
+      }
+      // if no shard key, the core will use round-robin arbitration
+      // (shardKey remains undefined)
+      
+      const selectedInstance = getModuleInstance(moduleName, shardKey)
+      if (!selectedInstance) {
+        return
+      }
+      
       const onMessage = (msg: any) => {
         if (msg.type === 'response' && msg.id === id) {
-          subprocess?.off('message', onMessage)
+          selectedInstance.process.off('message', onMessage)
           
           const response = JSON.stringify({ id: id, payload: msg.payload })
           if (handler.broadcast && !msg.payload.onlyReplyToSender) {
@@ -121,9 +136,9 @@ wss.on('connection', (ws) => {
         }
       }
       
-      subprocess?.on('message', onMessage)
+      selectedInstance.process.on('message', onMessage)
       
-      subprocess?.send({
+      selectedInstance.process.send({
         type: 'invoke',
         id: id,
         handlerId: handler.handlerId,

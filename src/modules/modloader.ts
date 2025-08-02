@@ -17,11 +17,23 @@ interface ModuleManifest {
   entryPoint?: string
   repo?: string
   dependencies?: string[]
+  multiInstanceSpawning?: boolean
   path?: string
 }
 
+interface ModuleInstance {
+  process: ChildProcess
+  instanceId: string
+  manifest: ModuleManifest
+}
+
+interface LoadBalancingConfig {
+  loadBalancing: Record<string, number>
+}
+
 const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
-export const modules = new Map<string, ChildProcess>()
+const settingsPath = path.join(os.homedir(), '.config', 'statehub', 'settings.json')
+export const modules = new Map<string, ModuleInstance[]>()
 export const wsCommandRegistry = new Map<string, {
   moduleName: string
   handlerId: string
@@ -29,6 +41,64 @@ export const wsCommandRegistry = new Map<string, {
   auth: boolean
 }>()
 export const manifests = new Map<string, ModuleManifest>()
+export const roundRobinCounters = new Map<string, number>()
+
+let loadBalancingConfig: LoadBalancingConfig = { loadBalancing: {} }
+
+function loadConfiguration() {
+  if (fs.existsSync(settingsPath)) {
+    try {
+      const configData = fs.readFileSync(settingsPath, 'utf-8')
+      loadBalancingConfig = JSON.parse(configData)
+      log('Load balancing configuration loaded')
+    } catch (error) {
+      warn('Failed to parse settings.json, using defaults')
+      loadBalancingConfig = { loadBalancing: {} }
+    }
+  } else {
+    log('No settings.json found, using default configuration')
+    loadBalancingConfig = { loadBalancing: {} }
+  }
+}
+
+function hashShardKey(key: string): number {
+  let hash = 0
+  for (let i = 0; i < key.length; i++) {
+    const char = key.charCodeAt(i)
+    hash = ((hash << 5) - hash) + char
+    hash = hash & hash
+  }
+  return Math.abs(hash)
+}
+
+function getInstanceBySharding(moduleName: string, shardKey: string): ModuleInstance | null {
+  const instances = modules.get(moduleName)
+  if (!instances || instances.length === 0) return null
+  
+  const hash = hashShardKey(shardKey)
+  const index = hash % instances.length
+  return instances[index]
+}
+
+function getInstanceByRoundRobin(moduleName: string): ModuleInstance | null {
+  const instances = modules.get(moduleName)
+  if (!instances || instances.length === 0) return null
+  
+  const counter = roundRobinCounters.get(moduleName) || 0
+  const index = counter % instances.length
+  roundRobinCounters.set(moduleName, counter + 1)
+  return instances[index]
+}
+
+export function getModuleInstance(
+  moduleName: string,
+  shardKey?: string
+): ModuleInstance | null {
+  if (shardKey) {
+    return getInstanceBySharding(moduleName, shardKey)
+  }
+  return getInstanceByRoundRobin(moduleName)
+}
 
 let onRegisterRouter:
 ((namespace: string, router: Router) => void) | null = null
@@ -41,6 +111,8 @@ export function onRegisterModuleNamespaceRouter(
 
 export function loadAllModules() {
   log('Begin loading server modules')
+
+  loadConfiguration()
   
   if (!fs.existsSync(modulesDir)) {
     warn('No modules directory found, creating one...')
@@ -138,41 +210,80 @@ export function loadModule(modulePath: string) {
     return
   }
   
-  const subprocess = fork(entryPath, [], {
-    cwd: modulePath,
-    stdio: ['pipe', 'pipe', 'pipe', 'ipc']
-  })
+  const configuredInstances = loadBalancingConfig.loadBalancing[manifest.name] || 1
+  const multiInstanceSupported = manifest.multiInstanceSpawning !== false
   
-  const cleanup = (reason: string) => {
-    log(`Module ${manifest.name} unloaded (reason: ${reason})`,)
-    modules.delete(manifest.name)
-    
-    for (const key of wsCommandRegistry.keys())
-      if (key.startsWith(`${manifest.name}.`))
-        wsCommandRegistry.delete(key)
+  let instanceCount = 1
+  if (multiInstanceSupported) {
+    instanceCount = configuredInstances
+  } else if (configuredInstances > 1) {
+    warn(`Module ${manifest.name} does not support multi-instance spawning, limiting to 1 instance`)
   }
   
-  subprocess.on('exit', code => cleanup(`exited with error code ${code}`))
-  subprocess.on('close', code => cleanup(`exited with error code ${code}`))
-  subprocess.on('error', error => cleanup(`an error occurred "${error.message}"`))
-  subprocess.on('disconnect', () => cleanup('disconnected'))
+  const instances: ModuleInstance[] = []
   
-  subprocess.on('message', msg => handleModuleMessage(msg, manifest.name))
+  for (let i = 0; i < instanceCount; i++) {
+    const instanceId = `${manifest.name}-${i}`
+    
+    const subprocess = fork(entryPath, [], {
+      cwd: modulePath,
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc']
+    })
+    
+    const moduleInstance: ModuleInstance = {
+      process: subprocess,
+      instanceId,
+      manifest
+    }
+    
+    const cleanup = (reason: string) => {
+      log(`Module instance ${instanceId} unloaded (reason: ${reason})`)
+      const moduleInstances = modules.get(manifest.name)
+      if (moduleInstances) {
+        const index = moduleInstances.findIndex(inst => inst.instanceId === instanceId)
+        if (index !== -1) {
+          moduleInstances.splice(index, 1)
+          if (moduleInstances.length === 0) {
+            modules.delete(manifest.name)
+          }
+        }
+      }
+      
+      for (const key of wsCommandRegistry.keys()) {
+        if (key.startsWith(`${manifest.name}.`)) {
+          wsCommandRegistry.delete(key)
+        }
+      }
+    }
+    
+    subprocess.on('exit', code => cleanup(`exited with error code ${code}`))
+    subprocess.on('close', code => cleanup(`exited with error code ${code}`))
+    subprocess.on('error', error => cleanup(`an error occurred "${error.message}"`))
+    subprocess.on('disconnect', () => cleanup('disconnected'))
+    
+    subprocess.on('message', msg => handleModuleMessage(msg, manifest.name, instanceId))
+    
+    subprocess.send?.({
+      type: 'init',
+      payload: {
+        pgUrl: process.env.PG_URL,
+        instanceId
+      }
+    })
+    
+    instances.push(moduleInstance)
+  }
   
-  subprocess.send?.({
-    type: 'init',
-    payload: null
-  })
-  
-  modules.set(manifest.name, subprocess)
-  log(`Module "${manifest.name}" loaded.`)
+  modules.set(manifest.name, instances)
+  log(`Module "${manifest.name}" loaded with ${instanceCount} instance(s).`)
 }
 
 function handleModuleMessage(
   msg: any,
-  moduleName: string
+  moduleName: string,
+  instanceId?: string
 ) {
-  const { type, payload, level, message, id, to, isResult } = msg
+  const { type, payload, level, message, id, to, isResult, shardKey } = msg
   
   switch (type) {
     case 'register':
@@ -181,19 +292,19 @@ function handleModuleMessage(
     
     case 'log':
       switch (level) {
-        case 'fatal': fatal(message, moduleName); break
-        case 'error': error(message, moduleName); break
-        case 'warning': warn(message, moduleName); break
-        default: log(message, level || 'info', moduleName)
+        case 'fatal': fatal(message, instanceId || moduleName); break
+        case 'error': error(message, instanceId || moduleName); break
+        case 'warning': warn(message, instanceId || moduleName); break
+        default: log(message, level || 'info', instanceId || moduleName)
       }
       break
     
     case 'intermoduleMessage':
-      const target = modules[to]
-      if (!target)
+      const targetInstance = getModuleInstance(to, shardKey)
+      if (!targetInstance)
         return
 
-      target.send?.({
+      targetInstance.process.send?.({
         type: isResult? 'mpcResponse' : 'mpcRequest',
         id,
         payload
@@ -202,23 +313,25 @@ function handleModuleMessage(
 
     case 'databaseQuery':
       if (!id) {
-        error('Database query requires message id', moduleName)
+        error('Database query requires message id', instanceId || moduleName)
         return
       }
       
       sql.unsafe(payload)
         .then(result => {
-          const mod = modules.get(moduleName)
-          mod?.send?.({
+          const moduleInstances = modules.get(moduleName)
+          const sourceInstance = moduleInstances?.find(inst => inst.instanceId === instanceId)
+          sourceInstance?.process.send?.({
             type: 'databaseResult',
             id,
             payload: result
           })
         })
         .catch(err => {
-          error(`Database query error: ${err.message}`, moduleName)
-          const mod = modules.get(moduleName)
-          mod?.send?.({
+          error(`Database query error: ${err.message}`, instanceId || moduleName)
+          const moduleInstances = modules.get(moduleName)
+          const sourceInstance = moduleInstances?.find(inst => inst.instanceId === instanceId)
+          sourceInstance?.process.send?.({
             type: 'databaseError',
             id,
             payload: err.message
@@ -227,16 +340,16 @@ function handleModuleMessage(
       break
 
     default:
-      // log(`Message from ${moduleName}: ${JSON.stringify(msg)}`)
+      // log(`Message from ${instanceId || moduleName}: ${JSON.stringify(msg)}`)
       break
   }
 }
 
 function registerModuleEndpoints(name: string, payload: any) {
   const { routes, commands } = payload
-  const subprocess = modules.get(name)
+  const moduleInstances = modules.get(name)
   
-  if (!subprocess)
+  if (!moduleInstances || moduleInstances.length === 0)
     return
   
   const router = Router()
@@ -254,7 +367,10 @@ function registerModuleEndpoints(name: string, payload: any) {
         .includes('multipart/form-data')
       const timeoutMs = isMultipart ? 30_000 : 5_000 
       
-      if (!subprocess || subprocess.killed) {
+      const shardKey = req.user?.id || req.headers['x-shard-key'] as string
+      const selectedInstance = getModuleInstance(name, shardKey)
+      
+      if (!selectedInstance || selectedInstance.process.killed) {
         return res.status(503).json({
           error: 'Module service unavailable',
           module: name
@@ -262,14 +378,14 @@ function registerModuleEndpoints(name: string, payload: any) {
       }
 
       const timeout = setTimeout(() => {
-        subprocess.off('message', onMessage)
+        selectedInstance.process.off('message', onMessage)
         res.status(504).json({ error: 'timeout' })
       }, timeoutMs)
       
       const onMessage = (msg: any) => {
         clearTimeout(timeout)
         if (msg.type === 'response' && msg.id === requestId) {
-          subprocess.off('message', onMessage)
+          selectedInstance.process.off('message', onMessage)
           if (msg.contentType) {
             res.setHeader('Content-Type', msg.contentType)
             res.status(msg.status || 200).send(msg.payload)
@@ -279,9 +395,9 @@ function registerModuleEndpoints(name: string, payload: any) {
         }
       }
       
-      subprocess.on('message', onMessage)
+      selectedInstance.process.on('message', onMessage)
       
-      subprocess.send({
+      selectedInstance.process.send({
         type: 'invoke',
         id: requestId,
         handlerId: handlerId,
