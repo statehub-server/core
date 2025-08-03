@@ -266,7 +266,6 @@ export function loadModule(modulePath: string) {
     subprocess.send?.({
       type: 'init',
       payload: {
-        pgUrl: process.env.PG_URL,
         instanceId
       }
     })
