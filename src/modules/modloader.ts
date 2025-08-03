@@ -312,7 +312,7 @@ function handleModuleMessage(
 
     case 'databaseQuery':
       if (!id) {
-        error('Database query requires message id', instanceId || moduleName)
+        error(`Database query requires message id`)
         return
       }
       
