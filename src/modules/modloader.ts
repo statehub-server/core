@@ -316,8 +316,12 @@ function registerModuleCommands(moduleName: string, commands: any[]) {
   if (!manifest) return
 
   for (const command of commands) {
-    const namespace = manifest.name.startsWith('@') ? manifest.name.split('/')[0] : null
-    const baseModuleName = manifest.name.startsWith('@') ? manifest.name.split('/')[1] : manifest.name
+    const namespace = manifest.name.startsWith('@')
+    ? manifest.name.split('/')[0]
+    : null
+    const baseModuleName = manifest.name.startsWith('@')
+    ? manifest.name.split('/')[1]
+    : manifest.name
     const fullCommand = namespace 
       ? `${namespace}/${baseModuleName}.${command.command}`
       : `${baseModuleName}.${command.command}`
