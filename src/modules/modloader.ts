@@ -52,32 +52,62 @@ export function getModuleContext(moduleName: string): ModuleContext | null {
   return modules.get(moduleName) || null
 }
 
+// Recursively find all modules in the modules directory
+function findAllModules(): Array<{ name: string; path: string }> {
+  const modules: Array<{ name: string; path: string }> = []
+  
+  if (!fs.existsSync(modulesDir)) {
+    return modules
+  }
+  
+  function scanDirectory(dir: string, namespace?: string): void {
+    const entries = fs.readdirSync(dir, { withFileTypes: true })
+    
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const entryPath = path.join(dir, entry.name)
+        const manifestPath = path.join(entryPath, 'manifest.json')
+        
+        if (entry.name.startsWith('@') && !namespace) {
+          // This is a namespace directory, scan inside it
+          scanDirectory(entryPath, entry.name)
+        } else if (fs.existsSync(manifestPath)) {
+          // This is a module directory with manifest
+          const moduleName = namespace ? `${namespace}/${entry.name}` : entry.name
+          modules.push({ name: moduleName, path: entryPath })
+        }
+      }
+    }
+  }
+  
+  scanDirectory(modulesDir)
+  return modules
+}
+
 export function loadAllModules() {
   log('Begin loading server modules')
   
   if (!fs.existsSync(modulesDir)) {
     warn('No modules directory found, creating one...')
-    fs.mkdirSync(modulesDir)
+    fs.mkdirSync(modulesDir, { recursive: true })
     return
   }
   
-  const moduleDirs = fs.readdirSync(modulesDir, { withFileTypes: true })
-  .filter(dirent => dirent.isDirectory())
+  const moduleList = findAllModules()
   
-  if (!moduleDirs.length) {
+  if (!moduleList.length) {
     log('No modules found.')
     return
   }
   
-  for (const dirent of moduleDirs) {
-    const modulePath = path.join(modulesDir, dirent.name)
-    const manifestPath = path.join(modulePath, 'manifest.json')
+  for (const module of moduleList) {
+    const manifestPath = path.join(module.path, 'manifest.json')
     
     if (!fs.existsSync(manifestPath))
       continue
 
     const rawManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as ModuleManifest
-    const manifest = { ...rawManifest, path: modulePath }
+    const manifest = { ...rawManifest, path: module.path }
     manifests.set(manifest.name, manifest)
   }
 
