@@ -94,6 +94,154 @@ function sendWebSocketResponse(
   }
 }
 
+function parseWebSocketMessage(message: any) {
+  const data = JSON.parse(message.toString())
+  return {
+    command: data.command,
+    payload: data.payload || {},
+    id: data.id || crypto.randomUUID(),
+    token: data.token || null,
+    target: data.target || 'self'
+  }
+}
+
+async function authenticateUser(token: string) {
+  if (!token) return null
+  
+  const secretKey = process.env.SECRET_KEY || ''
+  try {
+    verify(token, secretKey)
+    const user = await userByToken(token)
+    if (!user) return null
+    
+    return {
+      ...user,
+      passwordhash: undefined,
+      passwordsalt: undefined,
+      lastip: undefined,
+    }
+  } catch(e) {
+    return null
+  }
+}
+
+function validateWebSocketCommand(command: string) {
+  if (typeof command !== 'string') return false
+  
+  const moduleName = command.startsWith('@') 
+    ? command.split('.')[0] 
+    : command.split('.')[0]
+  const handler = wsCommandRegistry.get(command)
+  
+  return handler && modules.get(moduleName) 
+    ? { moduleName, handler } 
+    : false
+}
+
+function setupReplyHandler(
+  moduleContext: any, 
+  id: string, 
+  target: string, 
+  handler: any, 
+  ws: WebSocket, 
+  clientId: string
+) {
+  let replyTimeoutId: NodeJS.Timeout
+  
+  const replyHandler = (data: { 
+    msgId: string, 
+    payload: any, 
+    contentType?: string 
+  }) => {
+    if (data.msgId === id) {
+      clearTimeout(replyTimeoutId)
+      const responseData = { id: id, payload: data.payload }
+      const response = JSON.stringify(responseData)
+      
+      sendWebSocketResponse(
+        response, 
+        target, 
+        handler.broadcast, 
+        ws, 
+        clientId
+      )
+      moduleContext.eventEmitter.off('reply', replyHandler)
+    }
+  }
+  
+  moduleContext.eventEmitter.on('reply', replyHandler)
+  
+  replyTimeoutId = setTimeout(() => {
+    moduleContext.eventEmitter.off('reply', replyHandler)
+  }, 30000)
+  
+  return { replyHandler, replyTimeoutId }
+}
+
+async function handleWebSocketCommand(
+  data: any, 
+  ws: WebSocket, 
+  clientId: string
+) {
+  const { command, payload, id, token, target } = data
+  
+  const validation = validateWebSocketCommand(command)
+  if (!validation) return
+  
+  const { moduleName, handler } = validation
+  const user = await authenticateUser(token)
+  
+  if (user) payload.user = user
+  else if (payload.user) payload.user = undefined
+  
+  const moduleContext = getModuleContext(moduleName)
+  if (!moduleContext) return
+  
+  const rpcHandler = moduleContext.handlers.get('rpc')
+  if (!rpcHandler) return
+  
+  const { replyHandler, replyTimeoutId } = setupReplyHandler(
+    moduleContext, 
+    id, 
+    target, 
+    handler, 
+    ws, 
+    clientId
+  )
+  
+  try {
+    const result = await rpcHandler({
+      id: id,
+      handlerId: handler.handlerId,
+      payload: {
+        query: {},
+        params: {},
+        body: payload,
+        headers: {},
+        user: payload.user
+      }
+    })
+    
+    if (result !== undefined) {
+      clearTimeout(replyTimeoutId)
+      moduleContext.eventEmitter.off('reply', replyHandler)
+      
+      const responseData = { id: id, payload: result }
+      const response = JSON.stringify(responseData)
+      
+      sendWebSocketResponse(
+        response, 
+        target, 
+        handler.broadcast, 
+        ws, 
+        clientId
+      )
+    }
+  } catch (error) {
+    warn(`Error handling WebSocket command ${handler.handlerId}: ${error}`)
+  }
+}
+
 wss.on('connection', (ws) => {
   const client = ws as IdentifiedWebSocket
   client.id = crypto.randomUUID()
@@ -103,81 +251,8 @@ wss.on('connection', (ws) => {
   
   ws.on('message', async (message) => {
     try {
-      const data = JSON.parse(message.toString())
-      const {
-        command,
-        payload = {},
-        id = crypto.randomUUID(),
-        token = null,
-        target = 'self'
-      } = data
-
-      if (typeof data.command !== 'string')
-        return
-
-      const moduleName = command.startsWith('@')
-        ? command.split('/')[1]?.split('.')[0]
-        : command.split('.')[0]
-      const handler = wsCommandRegistry.get(command)
-      const secretKey = process.env.SECRET_KEY || ''
-      if (payload.user)
-        payload.user = undefined
-
-      if (token) {
-        try {
-          verify(token, secretKey)
-          const user = await userByToken(token)
-          if (!user)
-            return
-
-          payload.user = {
-            ...user,
-            passwordhash: undefined,
-            passwordsalt: undefined,
-            lastip: undefined,
-          }
-        } catch(e) {}
-      }
-      
-      if (!handler || !modules.get(moduleName))
-        return
-      
-      const moduleContext = getModuleContext(moduleName)
-      if (!moduleContext) {
-        return
-      }
-      
-      const rpcHandler = moduleContext.handlers.get('rpc')
-      if (rpcHandler) {
-        try {
-          const result = await rpcHandler({
-            id: id,
-            handlerId: handler.handlerId,
-            payload: {
-              query: {},
-              params: {},
-              body: payload,
-              headers: {},
-              user: payload.user
-            }
-          })
-          
-          if (result !== undefined) {
-            const responseData = { id: id, payload: result }
-            const response = JSON.stringify(responseData)
-            
-            sendWebSocketResponse(
-              response,
-              target,
-              handler.broadcast,
-              ws,
-              client.id
-            )
-          }
-        } catch (error) {
-          warn(`Error handling WebSocket command ${handler.handlerId}: ${error}`)
-        }
-      }
+      const data = parseWebSocketMessage(message)
+      await handleWebSocketCommand(data, ws, client.id)
     } catch (e) {
       warn(`Malformed request received (invalid json)`)
     }

@@ -249,13 +249,13 @@ export function loadModule(modulePath: string) {
     getDatabase: () => sql,
     
     log: (message: string) => {
-      log(`[${manifest.name}] ${message}`)
+      log(`${message}`, 'info', manifest.name)
     },
     warn: (message: string) => {
-      warn(`[${manifest.name}] ${message}`)
+      warn(`${message}`, manifest.name)
     },
     error: (message: string) => {
-      error(`[${manifest.name}] ${message}`)
+      error(`${message}`, manifest.name)
     }
   }
 
@@ -297,10 +297,6 @@ export function loadModule(modulePath: string) {
 
     eventEmitter.on('broadcastToClients', (data) => {
       broadcastToAllClients(data.message)
-    })
-
-    eventEmitter.on('reply', (data) => {
-      handleRpcReply(data.msgId, data.payload, data.contentType)
     })
 
     log(`Module ${manifest.name} loaded successfully`)
@@ -360,24 +356,6 @@ function handleMpcRequest(
     }
   }
 }
-
-function handleRpcReply(
-  msgId: string,
-  payload: any,
-  contentType?: string
-) {
-  pendingReplies.set(msgId, { payload, contentType, timestamp: Date.now() })
-  
-  setTimeout(() => {
-    pendingReplies.delete(msgId)
-  }, 30000)
-}
-
-const pendingReplies = new Map<string, {
-  payload: any,
-  contentType?: string,
-  timestamp: number
-}>()
 
 function handleModuleMessage(
   moduleName: string,
