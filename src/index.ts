@@ -8,7 +8,7 @@ import { verify } from 'jsonwebtoken'
 import 'dotenv/config'
 import { log, warn } from './logger'
 import { exitIfDbConnectionFailed, migrateDb } from './db/db' 
-import authRouter from './routes/auth'
+import authRouter, { authMiddleware } from './routes/auth'
 import oauth2Router from './routes/oauth2'
 import {
   modules,
@@ -62,7 +62,7 @@ app.use(express.json({ limit: '8mb' }))
 app.use('/auth', authRouter)
 app.use('/oauth', oauth2Router)
 onRegisterModuleNamespaceRouter((namespace, router) => {
-  app.use(`/${namespace}`, router)
+  app.use(`/${namespace}`, authMiddleware, router)
 })
 
 function sendWebSocketResponse(
