@@ -62,7 +62,7 @@ app.use(express.json({ limit: '8mb' }))
 app.use('/auth', authRouter)
 app.use('/oauth', oauth2Router)
 onRegisterModuleNamespaceRouter((namespace, router) => {
-  app.use(`/${namespace}`, authMiddleware, router)
+  app.use(`${namespace}`, router)
 })
 
 function sendWebSocketResponse(
