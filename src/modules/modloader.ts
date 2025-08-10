@@ -6,9 +6,7 @@ import crypto from 'crypto'
 import { Router } from 'express'
 import { EventEmitter } from 'events'
 import { log, warn, error, fatal } from '../logger'
-import { authMiddleware } from '../routes/auth'
 import { sql } from '../db/db'
-import type { IdentifiedWebSocket } from '../utils/identifiedws'
 
 interface ModuleManifest {
   name: string
