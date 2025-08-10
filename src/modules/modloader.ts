@@ -1,12 +1,14 @@
-import { fork, ChildProcess } from 'child_process'
+import * as vm from 'vm'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
 import crypto from 'crypto'
 import { Router } from 'express'
+import { EventEmitter } from 'events'
 import { log, warn, error, fatal } from '../logger'
 import { authMiddleware } from '../routes/auth'
 import { sql } from '../db/db'
+import type { IdentifiedWebSocket } from '../utils/identifiedws'
 
 interface ModuleManifest {
   name: string
@@ -17,23 +19,18 @@ interface ModuleManifest {
   entryPoint?: string
   repo?: string
   dependencies?: string[]
-  multiInstanceSpawning?: boolean
   path?: string
 }
 
-interface ModuleInstance {
-  process: ChildProcess
-  instanceId: string
+interface ModuleContext {
+  context: any
   manifest: ModuleManifest
-}
-
-interface LoadBalancingConfig {
-  loadBalancing: Record<string, number>
+  eventEmitter: EventEmitter
+  handlers: Map<string, (...args: any[]) => any>
 }
 
 const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
-const settingsPath = path.join(os.homedir(), '.config', 'statehub', 'settings.json')
-export const modules = new Map<string, ModuleInstance[]>()
+export const modules = new Map<string, ModuleContext>()
 export const wsCommandRegistry = new Map<string, {
   moduleName: string
   handlerId: string
@@ -41,64 +38,6 @@ export const wsCommandRegistry = new Map<string, {
   auth: boolean
 }>()
 export const manifests = new Map<string, ModuleManifest>()
-export const roundRobinCounters = new Map<string, number>()
-
-let loadBalancingConfig: LoadBalancingConfig = { loadBalancing: {} }
-
-function loadConfiguration() {
-  if (fs.existsSync(settingsPath)) {
-    try {
-      const configData = fs.readFileSync(settingsPath, 'utf-8')
-      loadBalancingConfig = JSON.parse(configData)
-      log('Load balancing configuration loaded')
-    } catch (error) {
-      warn('Failed to parse settings.json, using defaults')
-      loadBalancingConfig = { loadBalancing: {} }
-    }
-  } else {
-    log('No settings.json found, using default configuration')
-    loadBalancingConfig = { loadBalancing: {} }
-  }
-}
-
-function hashShardKey(key: string): number {
-  let hash = 0
-  for (let i = 0; i < key.length; i++) {
-    const char = key.charCodeAt(i)
-    hash = ((hash << 5) - hash) + char
-    hash = hash & hash
-  }
-  return Math.abs(hash)
-}
-
-function getInstanceBySharding(moduleName: string, shardKey: string): ModuleInstance | null {
-  const instances = modules.get(moduleName)
-  if (!instances || instances.length === 0) return null
-  
-  const hash = hashShardKey(shardKey)
-  const index = hash % instances.length
-  return instances[index]
-}
-
-function getInstanceByRoundRobin(moduleName: string): ModuleInstance | null {
-  const instances = modules.get(moduleName)
-  if (!instances || instances.length === 0) return null
-  
-  const counter = roundRobinCounters.get(moduleName) || 0
-  const index = counter % instances.length
-  roundRobinCounters.set(moduleName, counter + 1)
-  return instances[index]
-}
-
-export function getModuleInstance(
-  moduleName: string,
-  shardKey?: string
-): ModuleInstance | null {
-  if (shardKey) {
-    return getInstanceBySharding(moduleName, shardKey)
-  }
-  return getInstanceByRoundRobin(moduleName)
-}
 
 let onRegisterRouter:
 ((namespace: string, router: Router) => void) | null = null
@@ -109,10 +48,12 @@ export function onRegisterModuleNamespaceRouter(
   onRegisterRouter = fn
 }
 
+export function getModuleContext(moduleName: string): ModuleContext | null {
+  return modules.get(moduleName) || null
+}
+
 export function loadAllModules() {
   log('Begin loading server modules')
-
-  loadConfiguration()
   
   if (!fs.existsSync(modulesDir)) {
     warn('No modules directory found, creating one...')
@@ -209,218 +150,250 @@ export function loadModule(modulePath: string) {
     warn(`Skipping ${manifest.name}: Entry file ${entryFile} not found.`)
     return
   }
-  
-  const configuredInstances = loadBalancingConfig.loadBalancing[manifest.name] || 1
-  const multiInstanceSupported = manifest.multiInstanceSpawning !== false
-  
-  let instanceCount = 1
-  if (multiInstanceSupported) {
-    instanceCount = configuredInstances
-  } else if (configuredInstances > 1) {
-    warn(`Module ${manifest.name} does not support multi-instance spawning, limiting to 1 instance`)
-  }
-  
-  const instances: ModuleInstance[] = []
-  
-  for (let i = 0; i < instanceCount; i++) {
-    const instanceId = `${manifest.name}-${i}`
+
+  log(`Loading module: ${manifest.name}`)
+
+  const vmContext = vm.createContext({
+    require,
+    module: { exports: {} },
+    exports: {},
+    __dirname: modulePath,
+    __filename: entryPath,
+    console,
+    Buffer,
+    process: {
+      env: process.env,
+      cwd: () => modulePath,
+      pid: process.pid
+    },
+    setTimeout,
+    setInterval,
+    clearTimeout,
+    clearInterval
+  })
+
+  const eventEmitter = new EventEmitter()
+  const handlers = new Map<string, (payload: any) => any>()
+
+  vmContext.Statehub = {
+    registerCommands: (commands: any[]) => {
+      registerModuleCommands(manifest.name, commands)
+    },
     
-    const subprocess = fork(entryPath, [], {
-      cwd: modulePath,
-      stdio: ['pipe', 'pipe', 'pipe', 'ipc']
-    })
+    sendMpcRequest: (target: string, command: string, args: any[], id: string) => {
+      handleMpcRequest(manifest.name, target, command, args, id)
+    },
     
-    const moduleInstance: ModuleInstance = {
-      process: subprocess,
-      instanceId,
-      manifest
+    onMpcRequest: (handler: (...args: any[]) => any) => {
+      handlers.set('mpc', handler)
+    },
+    
+    onRPCInvoke: (handler: (...args: any[]) => any) => {
+      handlers.set('rpc', handler)
+    },
+    
+    reply: (msgId: string, payload: any, contentType?: string) => {
+      eventEmitter.emit('reply', { msgId, payload, contentType })
+    },
+    
+    onMessage: (type: string, handler: (payload: any) => any) => {
+      handlers.set(type, handler)
+    },
+    sendMessage: (to: string, message: any, shardKey?: string) => {
+      eventEmitter.emit('message', { to, message, shardKey })
+    },
+    onClientConnect: (handler: (payload: any) => any) => {
+      handlers.set('clientConnect', handler)
+    },
+    onClientDisconnect: (handler: (payload: any) => any) => {
+      handlers.set('clientDisconnect', handler)
+    },
+    onWebSocketMessage: (handler: (payload: any) => any) => {
+      handlers.set('webSocketMessage', handler)
+    },
+    sendToClient: (clientId: string, message: any) => {
+      eventEmitter.emit('sendToClient', { clientId, message })
+    },
+    broadcastToClients: (message: any) => {
+      eventEmitter.emit('broadcastToClients', { message })
+    },
+    
+    getDatabase: () => sql,
+    
+    log: (message: string) => {
+      log(`[${manifest.name}] ${message}`)
+    },
+    warn: (message: string) => {
+      warn(`[${manifest.name}] ${message}`)
+    },
+    error: (message: string) => {
+      error(`[${manifest.name}] ${message}`)
     }
-    
-    const cleanup = (reason: string) => {
-      log(`Module instance ${instanceId} unloaded (reason: ${reason})`)
-      const moduleInstances = modules.get(manifest.name)
-      if (moduleInstances) {
-        const index = moduleInstances.findIndex(inst => inst.instanceId === instanceId)
-        if (index !== -1) {
-          moduleInstances.splice(index, 1)
-          if (moduleInstances.length === 0) {
-            modules.delete(manifest.name)
-          }
-        }
-      }
-      
-      for (const key of wsCommandRegistry.keys()) {
-        if (key.startsWith(`${manifest.name}.`)) {
-          wsCommandRegistry.delete(key)
-        }
-      }
-    }
-    
-    subprocess.on('exit', code => cleanup(`exited with error code ${code}`))
-    subprocess.on('close', code => cleanup(`exited with error code ${code}`))
-    subprocess.on('error', error => cleanup(`an error occurred "${error.message}"`))
-    subprocess.on('disconnect', () => cleanup('disconnected'))
-    
-    subprocess.on('message', msg => handleModuleMessage(msg, manifest.name, instanceId))
-    
-    subprocess.send?.({
-      type: 'init',
-      payload: {
-        instanceId
-      }
-    })
-    
-    instances.push(moduleInstance)
   }
-  
-  modules.set(manifest.name, instances)
-  log(`Module "${manifest.name}" loaded with ${instanceCount} instance(s).`)
+
+  try {
+    const moduleCode = fs.readFileSync(entryPath, 'utf-8')
+    vm.runInContext(moduleCode, vmContext)
+    
+    const moduleExports = vmContext.module.exports || vmContext.exports
+    
+    const moduleContext: ModuleContext = {
+      context: vmContext,
+      manifest,
+      eventEmitter,
+      handlers
+    }
+
+    modules.set(manifest.name, moduleContext)
+
+    if (moduleExports.router && onRegisterRouter) {
+      const namespace = manifest.name.startsWith('@')
+        ? manifest.name.split('/')[0]
+        : null
+      const moduleName = manifest.name.startsWith('@')
+        ? manifest.name.split('/')[1]
+        : manifest.name
+      const routePath = namespace
+        ? `/${namespace}/${moduleName}`
+        : `/${moduleName}`
+      onRegisterRouter(routePath, moduleExports.router)
+    }
+
+    eventEmitter.on('message', (data) => {
+      handleModuleMessage(manifest.name, data.to, data.message, data.shardKey)
+    })
+
+    eventEmitter.on('sendToClient', (data) => {
+      sendToTargetedClient(data.clientId, data.message)
+    })
+
+    eventEmitter.on('broadcastToClients', (data) => {
+      broadcastToAllClients(data.message)
+    })
+
+    eventEmitter.on('reply', (data) => {
+      handleRpcReply(data.msgId, data.payload, data.contentType)
+    })
+
+    log(`Module ${manifest.name} loaded successfully`)
+  } catch (error) {
+    warn(`Failed to load module ${manifest.name}: ${error}`)
+  }
 }
+
+function registerModuleCommands(moduleName: string, commands: any[]) {
+  const manifest = manifests.get(moduleName)
+  if (!manifest) return
+
+  for (const command of commands) {
+    const namespace = manifest.name.startsWith('@') ? manifest.name.split('/')[0] : null
+    const baseModuleName = manifest.name.startsWith('@') ? manifest.name.split('/')[1] : manifest.name
+    const fullCommand = namespace 
+      ? `${namespace}/${baseModuleName}.${command.command}`
+      : `${baseModuleName}.${command.command}`
+    
+    wsCommandRegistry.set(fullCommand, {
+      moduleName,
+      handlerId: command.handlerId,
+      broadcast: command.broadcast || false,
+      auth: command.auth || false
+    })
+  }
+}
+
+function handleMpcRequest(
+  fromModule: string,
+  targetModule: string,
+  command: string,
+  args: any[],
+  requestId: string
+) {
+  const target = modules.get(targetModule)
+  if (!target) {
+    warn(`MPC target module "${targetModule}" not found`)
+    return
+  }
+  
+  const handler = target.handlers.get('mpc')
+  if (handler) {
+    try {
+      const result = handler.apply(null, [command, ...args])
+      
+      const sourceModule = modules.get(fromModule)
+      if (sourceModule) {
+        sourceModule.eventEmitter.emit('mpcResponse', { requestId, result })
+      }
+    } catch (error) {
+      warn(`Error handling MPC request in module ${targetModule}: ${error}`)
+    }
+  }
+}
+
+function handleRpcReply(
+  msgId: string,
+  payload: any,
+  contentType?: string
+) {
+  pendingReplies.set(msgId, { payload, contentType, timestamp: Date.now() })
+  
+  setTimeout(() => {
+    pendingReplies.delete(msgId)
+  }, 30000)
+}
+
+const pendingReplies = new Map<string, {
+  payload: any,
+  contentType?: string,
+  timestamp: number
+}>()
 
 function handleModuleMessage(
-  msg: any,
   moduleName: string,
-  instanceId?: string
+  to: string,
+  message: any,
+  shardKey?: string
 ) {
-  const { type, payload, level, message, id, to, isResult, shardKey } = msg
-  
-  switch (type) {
-    case 'register':
-      registerModuleEndpoints(moduleName, payload)
-      break
-    
-    case 'log':
-      switch (level) {
-        case 'fatal': fatal(message, instanceId || moduleName); break
-        case 'error': error(message, instanceId || moduleName); break
-        case 'warning': warn(message, instanceId || moduleName); break
-        default: log(message, level || 'info', instanceId || moduleName)
-      }
-      break
-    
-    case 'intermoduleMessage':
-      const targetInstance = getModuleInstance(to, shardKey)
-      if (!targetInstance)
-        return
+  const targetModule = modules.get(to)
+  if (!targetModule) {
+    warn(`Message target module "${to}" not found`)
+    return
+  }
 
-      targetInstance.process.send?.({
-        type: isResult? 'mpcResponse' : 'mpcRequest',
-        id,
-        payload
-      })
-      break
-
-    case 'databaseQuery':
-      if (!id) {
-        error(`Database query requires message id`)
-        return
-      }
-      
-      sql.unsafe(payload)
-        .then(result => {
-          const moduleInstances = modules.get(moduleName)
-          const sourceInstance = moduleInstances?.find(inst => inst.instanceId === instanceId)
-          sourceInstance?.process.send?.({
-            type: 'databaseResult',
-            id,
-            payload: result
-          })
-        })
-        .catch(err => {
-          error(`Database query error: ${err.message}`, instanceId || moduleName)
-          const moduleInstances = modules.get(moduleName)
-          const sourceInstance = moduleInstances?.find(inst => inst.instanceId === instanceId)
-          sourceInstance?.process.send?.({
-            type: 'databaseError',
-            id,
-            payload: err.message
-          })
-        })
-      break
-
-    default:
-      // log(`Message from ${instanceId || moduleName}: ${JSON.stringify(msg)}`)
-      break
+  const handler = targetModule.handlers.get('message')
+  if (handler) {
+    try {
+      handler({ from: moduleName, message, shardKey })
+    } catch (error) {
+      warn(`Error handling message in module ${to}: ${error}`)
+    }
   }
 }
 
-function registerModuleEndpoints(name: string, payload: any) {
-  const { routes, commands } = payload
-  const moduleInstances = modules.get(name)
+function sendToTargetedClient(clientId: string, message: any) {
+  const { getOnlineClients } = require('../index')
+  const wsOnlineClients = getOnlineClients() as Set<any>
   
-  if (!moduleInstances || moduleInstances.length === 0)
-    return
-  
-  const router = Router()
-  
-  router.use((req, res, next) => authMiddleware(req, res, next))
-  
-  for(const route of routes || []) {
-    const { rawMethod, path, handlerId, auth } = route
-    const method = ['get', 'post', 'delete', 'put']
-      .includes(rawMethod)? rawMethod : 'get'
-
-    router[method](path, async (req, res) => {
-      const requestId = crypto.randomUUID()
-      const isMultipart = (req.headers['Content-Type'] || '')
-        .includes('multipart/form-data')
-      const timeoutMs = isMultipart ? 30_000 : 5_000 
-      
-      const shardKey = req.user?.id || req.headers['x-shard-key'] as string
-      const selectedInstance = getModuleInstance(name, shardKey)
-      
-      if (!selectedInstance || selectedInstance.process.killed) {
-        return res.status(503).json({
-          error: 'Module service unavailable',
-          module: name
-        })
-      }
-
-      const timeout = setTimeout(() => {
-        selectedInstance.process.off('message', onMessage)
-        res.status(504).json({ error: 'timeout' })
-      }, timeoutMs)
-      
-      const onMessage = (msg: any) => {
-        clearTimeout(timeout)
-        if (msg.type === 'response' && msg.id === requestId) {
-          selectedInstance.process.off('message', onMessage)
-          if (msg.contentType) {
-            res.setHeader('Content-Type', msg.contentType)
-            res.status(msg.status || 200).send(msg.payload)
-          } else {
-            res.status(msg.status || 200).json(msg.payload)
-          }
-        }
-      }
-      
-      selectedInstance.process.on('message', onMessage)
-      
-      selectedInstance.process.send({
-        type: 'invoke',
-        id: requestId,
-        handlerId: handlerId,
-        payload: {
-          query: req.query,
-          params: req.params,
-          body: req.body,
-          headers: req.headers,
-          user: auth ? req.user : undefined
-        }
-      })
-    })
+  for (const client of wsOnlineClients) {
+    if (client.id === clientId && client.readyState === 1) {
+      client.send(JSON.stringify({ 
+        type: 'moduleMessage',
+        payload: message
+      }))
+      break
+    }
   }
+}
+
+function broadcastToAllClients(message: any) {
+  const { getOnlineClients } = require('../index')
+  const wsOnlineClients = getOnlineClients() as Set<any>
   
-  for (const cmd of commands) {
-    const { command, handlerId, broadcast = false, auth = false } = cmd
-    wsCommandRegistry.set(`${name}.${command}`, {
-      moduleName: name,
-      handlerId,
-      broadcast,
-      auth
-    })
+  for (const client of wsOnlineClients) {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify({ 
+        type: 'moduleMessage',
+        payload: message
+      }))
+    }
   }
-  
-  if (onRegisterRouter)
-    onRegisterRouter(name, router)
 }

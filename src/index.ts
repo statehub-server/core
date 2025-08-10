@@ -15,7 +15,7 @@ import {
   loadAllModules,
   onRegisterModuleNamespaceRouter,
   wsCommandRegistry,
-  getModuleInstance
+  getModuleContext
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
@@ -28,6 +28,11 @@ const app = express()
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server })
 const wsOnlineClients = new Set<IdentifiedWebSocket>()
+const clientsById = new Map<string, IdentifiedWebSocket>()
+
+export function getOnlineClients() {
+  return wsOnlineClients
+}
 
 initializationMessage()
 
@@ -60,10 +65,40 @@ onRegisterModuleNamespaceRouter((namespace, router) => {
   app.use(`/${namespace}`, router)
 })
 
+function sendWebSocketResponse(
+  response: string, 
+  target: string, 
+  isBroadcast: boolean, 
+  senderWs: WebSocket, 
+  senderId: string
+) {
+  if (target === 'broadcast' || isBroadcast) {
+    for (const client of wsOnlineClients) {
+      if (client.readyState === 1) {
+        client.send(response)
+      }
+    }
+    return
+  }
+  
+  if (target === 'self' || target === senderId) {
+    senderWs.send(response)
+    return
+  }
+  
+  const targetClient = clientsById.get(target)
+  if (targetClient && targetClient.readyState === 1) {
+    targetClient.send(response)
+  } else {
+    senderWs.send(response)
+  }
+}
+
 wss.on('connection', (ws) => {
   const client = ws as IdentifiedWebSocket
   client.id = crypto.randomUUID()
   wsOnlineClients.add(client)
+  clientsById.set(client.id, client)
   log(`New client connected (id=${client.id})`)
   
   ws.on('message', async (message) => {
@@ -73,14 +108,15 @@ wss.on('connection', (ws) => {
         command,
         payload = {},
         id = crypto.randomUUID(),
-        token = null
+        token = null,
+        target = 'self'
       } = data
 
       if (typeof data.command !== 'string')
         return
 
       const moduleName = command.startsWith('@')
-        ? command.split('.').slice(0, 2).join('.')
+        ? command.split('/')[1]?.split('.')[0]
         : command.split('.')[0]
       const handler = wsCommandRegistry.get(command)
       const secretKey = process.env.SECRET_KEY || ''
@@ -106,44 +142,42 @@ wss.on('connection', (ws) => {
       if (!handler || !modules.get(moduleName))
         return
       
-      // Determine sharding key for routing
-      let shardKey: string | undefined
-      if (command.startsWith('@')) {
-        shardKey = command.split('.')[0]
-      } else if (payload.user?.id) {
-        shardKey = payload.user.id
-      }
-      // if no shard key, the core will use round-robin arbitration
-      // (shardKey remains undefined)
-      
-      const selectedInstance = getModuleInstance(moduleName, shardKey)
-      if (!selectedInstance) {
+      const moduleContext = getModuleContext(moduleName)
+      if (!moduleContext) {
         return
       }
       
-      const onMessage = (msg: any) => {
-        if (msg.type === 'response' && msg.id === id) {
-          selectedInstance.process.off('message', onMessage)
+      const rpcHandler = moduleContext.handlers.get('rpc')
+      if (rpcHandler) {
+        try {
+          const result = await rpcHandler({
+            id: id,
+            handlerId: handler.handlerId,
+            payload: {
+              query: {},
+              params: {},
+              body: payload,
+              headers: {},
+              user: payload.user
+            }
+          })
           
-          const response = JSON.stringify({ id: id, payload: msg.payload })
-          if (handler.broadcast && !msg.payload.onlyReplyToSender) {
-            for (const otherClient of wsOnlineClients)
-              if (otherClient.readyState === ws.OPEN)
-                otherClient.send(response)
-          } else {
-            ws.send(response)
+          if (result !== undefined) {
+            const responseData = { id: id, payload: result }
+            const response = JSON.stringify(responseData)
+            
+            sendWebSocketResponse(
+              response,
+              target,
+              handler.broadcast,
+              ws,
+              client.id
+            )
           }
+        } catch (error) {
+          warn(`Error handling WebSocket command ${handler.handlerId}: ${error}`)
         }
       }
-      
-      selectedInstance.process.on('message', onMessage)
-      
-      selectedInstance.process.send({
-        type: 'invoke',
-        id: id,
-        handlerId: handler.handlerId,
-        payload
-      })
     } catch (e) {
       warn(`Malformed request received (invalid json)`)
     }
@@ -152,6 +186,7 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     log(`Client ${client.id} disconnected`)
     wsOnlineClients.delete(client)
+    clientsById.delete(client.id)
   })
 })
 
