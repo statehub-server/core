@@ -32,8 +32,6 @@ export const modules = new Map<string, ModuleContext>()
 export const wsCommandRegistry = new Map<string, {
   moduleName: string
   handlerId: string
-  broadcast: boolean
-  auth: boolean
 }>()
 export const manifests = new Map<string, ModuleManifest>()
 
@@ -322,9 +320,7 @@ function registerModuleCommands(moduleName: string, commands: any[]) {
     
     wsCommandRegistry.set(fullCommand, {
       moduleName,
-      handlerId: command.handlerId,
-      broadcast: command.broadcast || false,
-      auth: command.auth || false
+      handlerId: command.handlerId
     })
   }
 }
@@ -404,6 +400,32 @@ function broadcastToAllClients(message: any) {
         type: 'moduleMessage',
         payload: message
       }))
+    }
+  }
+}
+
+export function notifyClientConnect(clientId: string) {
+  for (const [moduleName, moduleContext] of modules) {
+    const handler = moduleContext.handlers.get('clientConnect')
+    if (handler) {
+      try {
+        handler({ clientId })
+      } catch (error) {
+        warn(`Error handling client connect in module ${moduleName}: ${error}`)
+      }
+    }
+  }
+}
+
+export function notifyClientDisconnect(clientId: string) {
+  for (const [moduleName, moduleContext] of modules) {
+    const handler = moduleContext.handlers.get('clientDisconnect')
+    if (handler) {
+      try {
+        handler({ clientId })
+      } catch (error) {
+        warn(`Error handling client disconnect in module ${moduleName}: ${error}`)
+      }
     }
   }
 }

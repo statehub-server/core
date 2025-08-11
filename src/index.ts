@@ -15,7 +15,9 @@ import {
   loadAllModules,
   onRegisterModuleNamespaceRouter,
   wsCommandRegistry,
-  getModuleContext
+  getModuleContext,
+  notifyClientConnect,
+  notifyClientDisconnect
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
@@ -62,17 +64,16 @@ app.use(express.json({ limit: '8mb' }))
 app.use('/auth', authRouter)
 app.use('/oauth', oauth2Router)
 onRegisterModuleNamespaceRouter((namespace, router) => {
-  app.use(`${namespace}`, router)
+  app.use(`${namespace}`, authMiddleware, router)
 })
 
 function sendWebSocketResponse(
   response: string, 
   target: string, 
-  isBroadcast: boolean, 
   senderWs: WebSocket, 
   senderId: string
 ) {
-  if (target === 'broadcast' || isBroadcast) {
+  if (target === 'broadcast') {
     for (const client of wsOnlineClients) {
       if (client.readyState === 1) {
         client.send(response)
@@ -161,7 +162,6 @@ function setupReplyHandler(
       sendWebSocketResponse(
         response, 
         target, 
-        handler.broadcast, 
         ws, 
         clientId
       )
@@ -191,9 +191,6 @@ async function handleWebSocketCommand(
   const { moduleName, handler } = validation
   const user = await authenticateUser(token)
   
-  if (user) payload.user = user
-  else if (payload.user) payload.user = undefined
-  
   const moduleContext = getModuleContext(moduleName)
   if (!moduleContext) return
   
@@ -213,13 +210,9 @@ async function handleWebSocketCommand(
     const result = await rpcHandler({
       id: id,
       handlerId: handler.handlerId,
-      payload: {
-        query: {},
-        params: {},
-        body: payload,
-        headers: {},
-        user: payload.user
-      }
+      payload: payload,
+      target: target,
+      user: user
     })
     
     if (result !== undefined) {
@@ -232,7 +225,6 @@ async function handleWebSocketCommand(
       sendWebSocketResponse(
         response, 
         target, 
-        handler.broadcast, 
         ws, 
         clientId
       )
@@ -249,6 +241,8 @@ wss.on('connection', (ws) => {
   clientsById.set(client.id, client)
   log(`New client connected (id=${client.id})`)
   
+  notifyClientConnect(client.id)
+  
   ws.on('message', async (message) => {
     try {
       const data = parseWebSocketMessage(message)
@@ -262,6 +256,7 @@ wss.on('connection', (ws) => {
     log(`Client ${client.id} disconnected`)
     wsOnlineClients.delete(client)
     clientsById.delete(client.id)
+    notifyClientDisconnect(client.id)
   })
 })
 
