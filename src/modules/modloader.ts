@@ -7,6 +7,7 @@ import { Router } from 'express'
 import { EventEmitter } from 'events'
 import { log, warn, error, fatal } from '../logger'
 import { sql } from '../db/db'
+import { getOnlinePlayersMap } from '../utils/player-tracker'
 
 interface ModuleManifest {
   name: string
@@ -242,6 +243,10 @@ export function loadModule(modulePath: string) {
     },
     broadcastToClients: (message: any) => {
       eventEmitter.emit('broadcastToClients', { message })
+    },
+    
+    getOnlinePlayers: () => {
+      return getOnlinePlayersMap()
     },
     
     getDatabase: () => sql,

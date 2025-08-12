@@ -10,6 +10,7 @@ import { log, warn } from './logger'
 import { exitIfDbConnectionFailed, migrateDb } from './db/db' 
 import authRouter, { authMiddleware } from './routes/auth'
 import oauth2Router from './routes/oauth2'
+import serverInfoRouter from './routes/server-info'
 import {
   modules,
   loadAllModules,
@@ -21,6 +22,11 @@ import {
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
+import { 
+  addOnlinePlayer, 
+  removeOnlinePlayer, 
+  updatePlayerAuth
+} from './utils/player-tracker'
 import {
   crashedMessage,
   initializationMessage
@@ -63,6 +69,7 @@ app.use(express.json({ limit: '8mb' }))
 
 app.use('/auth', authRouter)
 app.use('/oauth', oauth2Router)
+app.use('/server', serverInfoRouter)
 onRegisterModuleNamespaceRouter((namespace, router) => {
   app.use(`${namespace}`, authMiddleware, router)
 })
@@ -191,6 +198,14 @@ async function handleWebSocketCommand(
   const { moduleName, handler } = validation
   const user = await authenticateUser(token)
   
+  if (user) {
+    updatePlayerAuth(
+      clientId,
+      user.username || 'Unknown',
+      user.id || 'Unknown'
+    )
+  }
+  
   const moduleContext = getModuleContext(moduleName)
   if (!moduleContext) return
   
@@ -239,8 +254,10 @@ wss.on('connection', (ws) => {
   client.id = crypto.randomUUID()
   wsOnlineClients.add(client)
   clientsById.set(client.id, client)
+  
   log(`New client connected (id=${client.id})`)
   
+  addOnlinePlayer(client.id, false, null, null)
   notifyClientConnect(client.id)
   
   ws.on('message', async (message) => {
@@ -256,6 +273,8 @@ wss.on('connection', (ws) => {
     log(`Client ${client.id} disconnected`)
     wsOnlineClients.delete(client)
     clientsById.delete(client.id)
+    
+    removeOnlinePlayer(client.id)
     notifyClientDisconnect(client.id)
   })
 })
