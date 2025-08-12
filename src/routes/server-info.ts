@@ -55,4 +55,42 @@ serverInfoRouter.get('/players', authMiddleware, (req: Request, res: Response): 
   res.json(response)
 })
 
+serverInfoRouter.get('/modules', authMiddleware, (req: Request, res: Response): any => {
+  const user = (req as any).user
+  
+  if (!user || !user.permissions) {
+    return res.status(404).send('Cannot GET /modules')
+  }
+  
+  const requiredPermissions = ['admin', 'dev', 'sysadmin', 'modc', 'superuser']
+  const userPermissions = Array.isArray(user.permissions) 
+    ? user.permissions 
+    : user.permissions ? [user.permissions] : []
+  
+  const hasPermission = requiredPermissions.some(permission => 
+    userPermissions.includes(permission)
+  )
+  
+  if (!hasPermission) {
+    return res.status(404).send('Cannot GET /modules')
+  }
+
+  const moduleDetails = Array.from(manifests.entries()).map(([moduleName, manifest]) => ({
+    name: moduleName,
+    displayName: manifest.name || moduleName,
+    version: manifest.version || '1.0.0',
+    author: manifest.author || 'Unknown',
+    description: manifest.description || '',
+    dependencies: manifest.dependencies || [],
+    dependencyCount: (manifest.dependencies || []).length
+  }))
+  
+  const response = {
+    modules: moduleDetails,
+    totalModules: moduleDetails.length
+  }
+  
+  res.json(response)
+})
+
 export default serverInfoRouter
