@@ -87,7 +87,19 @@ export async function updateUserLogin(
 ): Promise<any> {
   await sql`
     update users
-    set lastToken=${token}, lastIp=${ip}
+    set lastToken=${token}, lastIp=${ip}, lastLogin=NOW()
     where username=${username}
+  `
+}
+
+export async function updateUserLoginById(
+  userId: string,
+  token: string,
+  ip: string
+): Promise<any> {
+  await sql`
+    update users
+    set lastToken=${token}, lastIp=${ip}, lastLogin=NOW()
+    where id=${userId}
   `
 }

@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS users(
     passwordSalt TEXT NOT NULL,
     lastIp TEXT NOT NULL,
     lastToken TEXT,
-    createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    createdAt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lastLogin TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS userPermissions(
@@ -30,6 +31,16 @@ CREATE TABLE IF NOT EXISTS oauthIdentities (
   providerId TEXT NOT NULL,
   createdAt TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(provider, providerId)
+);
+
+CREATE TABLE IF NOT EXISTS bans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  userId UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  bannedBy UUID REFERENCES users(id),
+  bannedAt TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expiresAt TIMESTAMPTZ,
+  permaban BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 INSERT INTO users(

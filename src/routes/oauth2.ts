@@ -1,8 +1,12 @@
-import { Router, Request, Response, NextFunction } from 'express'
-import { verify, sign } from 'jsonwebtoken'
+import { Router } from 'express'
+import { sign } from 'jsonwebtoken'
 import crypto from 'crypto'
 import { error } from '../logger'
-import { createUserAccount, updateUserLogin, userByEmail } from '../db/auth'
+import {
+  createUserAccount,
+  updateUserLoginById,
+  userByEmail
+} from '../db/auth'
 import { sql } from '../db/db'
 
 const oauth2Router = Router()
@@ -49,7 +53,7 @@ async function loginUserOAuth2(user: any, ip: string) {
   const payload = { username: user.username, ip }
   const token = sign(payload, secretKey, { expiresIn: '12h' })
   
-  await updateUserLogin(user.username, token, ip)
+  await updateUserLoginById(user.id, token, ip)
   
   return {
     ok: true,
