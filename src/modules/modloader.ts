@@ -2,7 +2,6 @@ import * as vm from 'vm'
 import path from 'path'
 import fs from 'fs'
 import os from 'os'
-import crypto from 'crypto'
 import { Router } from 'express'
 import { EventEmitter } from 'events'
 import { log, warn, error, fatal } from '../logger'
@@ -21,11 +20,30 @@ interface ModuleManifest {
   path?: string
 }
 
+interface ConsoleSettingsField {
+  fieldName: string
+  fieldLabel: string
+  dataType: 'string' | 'number' | 'boolean' | 'color' | 'datetime' | 'multichoice' | 'textarea'
+  dataList?: string[]
+  options?: Array<{ key: string; val: string }>
+  fieldProcessor: string
+  defaultValue?: any
+  min?: number
+  max?: number
+  required?: boolean
+  description?: string
+}
+
+interface ConsoleSettings {
+  fields: ConsoleSettingsField[]
+}
+
 interface ModuleContext {
   context: any
   manifest: ModuleManifest
   eventEmitter: EventEmitter
   handlers: Map<string, (...args: any[]) => any>
+  consoleSettings?: ConsoleSettings
 }
 
 const modulesDir = path.join(os.homedir(), '.config', 'statehub', 'modules')
@@ -35,6 +53,7 @@ export const wsCommandRegistry = new Map<string, {
   handlerId: string
 }>()
 export const manifests = new Map<string, ModuleManifest>()
+export const moduleConsoleSettings = new Map<string, ConsoleSettings>()
 
 let onRegisterRouter:
 ((namespace: string, router: Router) => void) | null = null
@@ -49,7 +68,10 @@ export function getModuleContext(moduleName: string): ModuleContext | null {
   return modules.get(moduleName) || null
 }
 
-// Recursively find all modules in the modules directory
+export function getModuleConsoleSettings(moduleName: string): ConsoleSettings | null {
+  return moduleConsoleSettings.get(moduleName) || null
+}
+
 function findAllModules(): Array<{ name: string; path: string }> {
   const modules: Array<{ name: string; path: string }> = []
   
@@ -66,10 +88,8 @@ function findAllModules(): Array<{ name: string; path: string }> {
         const manifestPath = path.join(entryPath, 'manifest.json')
         
         if (entry.name.startsWith('@') && !namespace) {
-          // This is a namespace directory, scan inside it
           scanDirectory(entryPath, entry.name)
         } else if (fs.existsSync(manifestPath)) {
-          // This is a module directory with manifest
           const moduleName = namespace ? `${namespace}/${entry.name}` : entry.name
           modules.push({ name: moduleName, path: entryPath })
         }
@@ -81,22 +101,16 @@ function findAllModules(): Array<{ name: string; path: string }> {
   return modules
 }
 
-export function loadAllModules() {
-  log('Begin loading server modules')
-  
+function ensureModulesDirectory(): boolean {
   if (!fs.existsSync(modulesDir)) {
     warn('No modules directory found, creating one...')
     fs.mkdirSync(modulesDir, { recursive: true })
-    return
+    return false
   }
-  
-  const moduleList = findAllModules()
-  
-  if (!moduleList.length) {
-    log('No modules found.')
-    return
-  }
-  
+  return true
+}
+
+function loadModuleManifests(moduleList: Array<{ name: string; path: string }>) {
   for (const module of moduleList) {
     const manifestPath = path.join(module.path, 'manifest.json')
     
@@ -107,6 +121,23 @@ export function loadAllModules() {
     const manifest = { ...rawManifest, path: module.path }
     manifests.set(manifest.name, manifest)
   }
+}
+
+export function loadAllModules() {
+  log('Begin loading server modules')
+  
+  if (!ensureModulesDirectory()) {
+    return
+  }
+  
+  const moduleList = findAllModules()
+  
+  if (!moduleList.length) {
+    log('No modules found.')
+    return
+  }
+  
+  loadModuleManifests(moduleList)
 
   const { sorted, skipped } = dependencyTopologicalSort()
 
@@ -162,25 +193,112 @@ function dependencyTopologicalSort() {
   return { sorted, skipped }
 }
 
-export function loadModule(modulePath: string) {
+function readModuleManifest(modulePath: string): ModuleManifest | null {
   const manifestPath = path.join(modulePath, 'manifest.json')
+  
   if (!fs.existsSync(manifestPath)) {
-    warn(`Skipping ${modulePath}: No manifest.json found.`)
-    return
+    warn(`Skipping ${path.basename(modulePath)}: No manifest.json found.`)
+    return null
   }
   
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as ModuleManifest
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as ModuleManifest
+  } catch (err) {
+    warn(`Skipping ${path.basename(modulePath)}: Invalid manifest.json - ${err}`)
+    return null
+  }
+}
+
+function executeModule(modulePath: string, entryPath: string, manifest: ModuleManifest) {
+  log(`Loading module: ${manifest.name}`)
+  
+  const vmContext = createVMContext(modulePath, entryPath)
+  const eventEmitter = new EventEmitter()
+  const handlers = new Map<string, any>()
+  
+  vmContext.Statehub = createStatehubAPI(manifest, handlers, eventEmitter)
+  
+  try {
+    const moduleCode = fs.readFileSync(entryPath, 'utf-8')
+    vm.runInContext(moduleCode, vmContext)
+    
+    const moduleExports = vmContext.module.exports || vmContext.exports
+    
+    const moduleContext: ModuleContext = {
+      context: vmContext,
+      manifest,
+      eventEmitter,
+      handlers,
+      consoleSettings: undefined
+    }
+
+    modules.set(manifest.name, moduleContext)
+    
+    callModuleLoadHandler(handlers, manifest.name)
+    registerModuleRouter(moduleExports, manifest)
+    setupModuleEventHandlers(eventEmitter, manifest.name)
+    
+    log(`Module ${manifest.name} loaded successfully`)
+    
+  } catch (err) {
+    warn(`Failed to load module ${manifest.name}: ${err}`)
+  }
+}
+
+function callModuleLoadHandler(handlers: Map<string, any>, moduleName: string) {
+  const loadHandler = handlers.get('moduleLoad')
+  if (!loadHandler) return
+  
+  try {
+    const result = loadHandler(undefined)
+    if (result && typeof result.then === 'function') {
+      result.catch((error: any) => {
+        warn(`Error in module load handler for ${moduleName}: ${error}`)
+      })
+    }
+  } catch (error) {
+    warn(`Error in module load handler for ${moduleName}: ${error}`)
+  }
+}
+
+function registerModuleRouter(moduleExports: any, manifest: ModuleManifest) {
+  if (!moduleExports.router || !onRegisterRouter) return
+  
+  const namespace = getModuleNamespace(manifest)
+  const moduleName = getBaseModuleName(manifest)
+  const routePath = namespace ? `/${namespace}/${moduleName}` : `/${moduleName}`
+  
+  onRegisterRouter(routePath, moduleExports.router)
+}
+
+function setupModuleEventHandlers(eventEmitter: EventEmitter, moduleName: string) {
+  eventEmitter.on('message', (data) => {
+    handleModuleMessage(moduleName, data.to, data.message, data.shardKey)
+  })
+
+  eventEmitter.on('sendToClient', (data) => {
+    sendToTargetedClient(data.clientId, data.message)
+  })
+
+  eventEmitter.on('broadcastToClients', (data) => {
+    broadcastToAllClients(data.message)
+  })
+}
+
+function validateModuleFiles(modulePath: string, manifest: ModuleManifest): string | null {
   const entryFile = manifest.entryPoint || 'dist/index.js'
   const entryPath = path.join(modulePath, entryFile)
   
   if (!fs.existsSync(entryPath)) {
     warn(`Skipping ${manifest.name}: Entry file ${entryFile} not found.`)
-    return
+    return null
   }
+  
+  return entryPath
+}
 
-  log(`Loading module: ${manifest.name}`)
-
-  const vmContext = vm.createContext({
+function createVMContext(modulePath: string, entryPath: string) {
+  return vm.createContext({
     require,
     module: { exports: {} },
     exports: {},
@@ -198,13 +316,28 @@ export function loadModule(modulePath: string) {
     clearTimeout,
     clearInterval
   })
+}
 
-  const eventEmitter = new EventEmitter()
-  const handlers = new Map<string, (payload: any) => any>()
-
-  vmContext.Statehub = {
+function createStatehubAPI(
+  manifest: ModuleManifest,
+  handlers: Map<string, any>, 
+  eventEmitter: EventEmitter
+) {
+  return {
     registerCommands: (commands: any[]) => {
       registerModuleCommands(manifest.name, commands)
+    },
+    
+    registerConsoleSettings: (settings: ConsoleSettings) => {
+      moduleConsoleSettings.set(manifest.name, settings)
+    },
+    
+    onModuleLoad: (handler: () => void | Promise<void>) => {
+      handlers.set('moduleLoad', () => handler())
+    },
+    
+    onModuleUnload: (handler: () => void | Promise<void>) => {
+      handlers.set('moduleUnload', () => handler())
     },
     
     sendMpcRequest: (target: string, command: string, args: any[], id: string) => {
@@ -261,51 +394,33 @@ export function loadModule(modulePath: string) {
       error(`${message}`, manifest.name)
     }
   }
+}
 
-  try {
-    const moduleCode = fs.readFileSync(entryPath, 'utf-8')
-    vm.runInContext(moduleCode, vmContext)
-    
-    const moduleExports = vmContext.module.exports || vmContext.exports
-    
-    const moduleContext: ModuleContext = {
-      context: vmContext,
-      manifest,
-      eventEmitter,
-      handlers
-    }
+export function loadModule(modulePath: string) {
+  const manifest = readModuleManifest(modulePath)
+  if (!manifest) return
+  
+  const entryPath = validateModuleFiles(modulePath, manifest)
+  if (!entryPath) return
+  
+  executeModule(modulePath, entryPath, manifest)
+}
 
-    modules.set(manifest.name, moduleContext)
+function getModuleNamespace(manifest: ModuleManifest) {
+  return manifest.name.startsWith('@') ? manifest.name.split('/')[0] : null
+}
 
-    if (moduleExports.router && onRegisterRouter) {
-      const namespace = manifest.name.startsWith('@')
-        ? manifest.name.split('/')[0]
-        : null
-      const moduleName = manifest.name.startsWith('@')
-        ? manifest.name.split('/')[1]
-        : manifest.name
-      const routePath = namespace
-        ? `/${namespace}/${moduleName}`
-        : `/${moduleName}`
-      onRegisterRouter(routePath, moduleExports.router)
-    }
+function getBaseModuleName(manifest: ModuleManifest) {
+  return manifest.name.startsWith('@') 
+    ? manifest.name.split('/')[1] 
+    : manifest.name
+}
 
-    eventEmitter.on('message', (data) => {
-      handleModuleMessage(manifest.name, data.to, data.message, data.shardKey)
-    })
-
-    eventEmitter.on('sendToClient', (data) => {
-      sendToTargetedClient(data.clientId, data.message)
-    })
-
-    eventEmitter.on('broadcastToClients', (data) => {
-      broadcastToAllClients(data.message)
-    })
-
-    log(`Module ${manifest.name} loaded successfully`)
-  } catch (error) {
-    warn(`Failed to load module ${manifest.name}: ${error}`)
-  }
+function buildCommandName(namespace: string | null, baseModuleName: string, 
+                         command: string) {
+  return namespace 
+    ? `${namespace}/${baseModuleName}.${command}`
+    : `${baseModuleName}.${command}`
 }
 
 function registerModuleCommands(moduleName: string, commands: any[]) {
@@ -313,15 +428,9 @@ function registerModuleCommands(moduleName: string, commands: any[]) {
   if (!manifest) return
 
   for (const command of commands) {
-    const namespace = manifest.name.startsWith('@')
-    ? manifest.name.split('/')[0]
-    : null
-    const baseModuleName = manifest.name.startsWith('@')
-    ? manifest.name.split('/')[1]
-    : manifest.name
-    const fullCommand = namespace 
-      ? `${namespace}/${baseModuleName}.${command.command}`
-      : `${baseModuleName}.${command.command}`
+    const namespace = getModuleNamespace(manifest)
+    const baseModuleName = getBaseModuleName(manifest)
+    const fullCommand = buildCommandName(namespace, baseModuleName, command.command)
     
     wsCommandRegistry.set(fullCommand, {
       moduleName,
@@ -409,28 +518,62 @@ function broadcastToAllClients(message: any) {
   }
 }
 
-export function notifyClientConnect(clientId: string) {
+function notifyModulesOfClientEvent(eventType: string, payload: any) {
   for (const [moduleName, moduleContext] of modules) {
-    const handler = moduleContext.handlers.get('clientConnect')
+    const handler = moduleContext.handlers.get(eventType)
     if (handler) {
       try {
-        handler({ clientId })
+        handler(payload)
       } catch (error) {
-        warn(`Error handling client connect in module ${moduleName}: ${error}`)
+        warn(`Error handling ${eventType} in module ${moduleName}: ${error}`)
       }
     }
   }
 }
 
+export function notifyClientConnect(clientId: string) {
+  notifyModulesOfClientEvent('clientConnect', { clientId })
+}
+
 export function notifyClientDisconnect(clientId: string) {
-  for (const [moduleName, moduleContext] of modules) {
-    const handler = moduleContext.handlers.get('clientDisconnect')
-    if (handler) {
-      try {
-        handler({ clientId })
-      } catch (error) {
-        warn(`Error handling client disconnect in module ${moduleName}: ${error}`)
-      }
+  notifyModulesOfClientEvent('clientDisconnect', { clientId })
+}
+
+function callModuleUnloadHandler(moduleContext: ModuleContext, moduleName: string) {
+  const unloadHandler = moduleContext.handlers.get('moduleUnload')
+  if (!unloadHandler) return
+  
+  try {
+    const result = unloadHandler()
+    if (result && typeof result.then === 'function') {
+      result.catch((error: any) => {
+        warn(`Error in module unload handler for ${moduleName}: ${error}`)
+      })
+    }
+  } catch (error) {
+    warn(`Error in module unload handler for ${moduleName}: ${error}`)
+  }
+}
+
+function cleanupModuleRegistrations(moduleName: string) {
+  modules.delete(moduleName)
+  moduleConsoleSettings.delete(moduleName)
+  
+  for (const [command, registration] of wsCommandRegistry.entries()) {
+    if (registration.moduleName === moduleName) {
+      wsCommandRegistry.delete(command)
     }
   }
+}
+
+export function unloadModule(moduleName: string) {
+  const moduleContext = modules.get(moduleName)
+  if (!moduleContext) {
+    warn(`Cannot unload module ${moduleName}: not found`)
+    return
+  }
+
+  callModuleUnloadHandler(moduleContext, moduleName)
+  cleanupModuleRegistrations(moduleName)
+  log(`Module ${moduleName} unloaded`)
 }

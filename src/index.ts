@@ -18,7 +18,8 @@ import {
   wsCommandRegistry,
   getModuleContext,
   notifyClientConnect,
-  notifyClientDisconnect
+  notifyClientDisconnect,
+  unloadModule
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
@@ -246,6 +247,12 @@ async function handleWebSocketCommand(
     }
   } catch (error) {
     warn(`Error handling WebSocket command ${handler.handlerId}: ${error}`)
+    
+    // If this is a critical error, consider unloading the module
+    if (error instanceof Error && error.message.includes('MODULE_CRASH')) {
+      warn(`Module ${moduleName} crashed, unloading...`)
+      unloadModule(moduleName)
+    }
   }
 }
 
