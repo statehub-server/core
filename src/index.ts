@@ -19,7 +19,8 @@ import {
   getModuleContext,
   notifyClientConnect,
   notifyClientDisconnect,
-  unloadModule
+  unloadModule,
+  disconnectClient
 } from './modules/modloader'
 import { IdentifiedWebSocket } from './utils/identifiedws'
 import { userByToken } from './db/auth'
@@ -75,42 +76,13 @@ onRegisterModuleNamespaceRouter((namespace, router) => {
   app.use(`${namespace}`, authMiddleware, router)
 })
 
-function sendWebSocketResponse(
-  response: string, 
-  target: string, 
-  senderWs: WebSocket, 
-  senderId: string
-) {
-  if (target === 'broadcast') {
-    for (const client of wsOnlineClients) {
-      if (client.readyState === 1) {
-        client.send(response)
-      }
-    }
-    return
-  }
-  
-  if (target === 'self' || target === senderId) {
-    senderWs.send(response)
-    return
-  }
-  
-  const targetClient = clientsById.get(target)
-  if (targetClient && targetClient.readyState === 1) {
-    targetClient.send(response)
-  } else {
-    senderWs.send(response)
-  }
-}
-
 function parseWebSocketMessage(message: any) {
   const data = JSON.parse(message.toString())
   return {
     command: data.command,
     payload: data.payload || {},
     id: data.id || crypto.randomUUID(),
-    token: data.token || null,
-    target: data.target || 'self'
+    token: data.token || null
   }
 }
 
@@ -150,7 +122,6 @@ function validateWebSocketCommand(command: string) {
 function setupReplyHandler(
   moduleContext: any, 
   id: string, 
-  target: string, 
   handler: any, 
   ws: WebSocket, 
   clientId: string
@@ -167,12 +138,7 @@ function setupReplyHandler(
       const responseData = { id: id, payload: data.payload }
       const response = JSON.stringify(responseData)
       
-      sendWebSocketResponse(
-        response, 
-        target, 
-        ws, 
-        clientId
-      )
+      ws.send(response)
       moduleContext.eventEmitter.off('reply', replyHandler)
     }
   }
@@ -191,7 +157,7 @@ async function handleWebSocketCommand(
   ws: WebSocket, 
   clientId: string
 ) {
-  const { command, payload, id, token, target } = data
+  const { command, payload, id, token } = data
   
   const validation = validateWebSocketCommand(command)
   if (!validation) return
@@ -216,7 +182,6 @@ async function handleWebSocketCommand(
   const { replyHandler, replyTimeoutId } = setupReplyHandler(
     moduleContext, 
     id, 
-    target, 
     handler, 
     ws, 
     clientId
@@ -226,8 +191,8 @@ async function handleWebSocketCommand(
     const result = await rpcHandler({
       id: id,
       handlerId: handler.handlerId,
+      socketId: clientId,
       payload: payload,
-      target: target,
       user: user
     })
     
@@ -238,12 +203,7 @@ async function handleWebSocketCommand(
       const responseData = { id: id, payload: result }
       const response = JSON.stringify(responseData)
       
-      sendWebSocketResponse(
-        response, 
-        target, 
-        ws, 
-        clientId
-      )
+      ws.send(response)
     }
   } catch (error) {
     warn(`Error handling WebSocket command ${handler.handlerId}: ${error}`)

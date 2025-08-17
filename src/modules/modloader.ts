@@ -272,16 +272,16 @@ function registerModuleRouter(moduleExports: any, manifest: ModuleManifest) {
 }
 
 function setupModuleEventHandlers(eventEmitter: EventEmitter, moduleName: string) {
-  eventEmitter.on('message', (data) => {
-    handleModuleMessage(moduleName, data.to, data.message, data.shardKey)
-  })
-
   eventEmitter.on('sendToClient', (data) => {
     sendToTargetedClient(data.clientId, data.message)
   })
 
   eventEmitter.on('broadcastToClients', (data) => {
     broadcastToAllClients(data.message)
+  })
+
+  eventEmitter.on('disconnectClient', (data) => {
+    disconnectTargetedClient(data.socketId)
   })
 }
 
@@ -341,7 +341,7 @@ function createStatehubAPI(
     },
     
     sendMpcRequest: (target: string, command: string, args: any[], id: string) => {
-      handleMpcRequest(manifest.name, target, command, args, id)
+      return handleMpcRequest(manifest.name, target, command, args, id)
     },
     
     onMpcRequest: (handler: (...args: any[]) => any) => {
@@ -356,12 +356,6 @@ function createStatehubAPI(
       eventEmitter.emit('reply', { msgId, payload, contentType })
     },
     
-    onMessage: (type: string, handler: (payload: any) => any) => {
-      handlers.set(type, handler)
-    },
-    sendMessage: (to: string, message: any, shardKey?: string) => {
-      eventEmitter.emit('message', { to, message, shardKey })
-    },
     onClientConnect: (handler: (payload: any) => any) => {
       handlers.set('clientConnect', handler)
     },
@@ -376,6 +370,9 @@ function createStatehubAPI(
     },
     broadcastToClients: (message: any) => {
       eventEmitter.emit('broadcastToClients', { message })
+    },
+    disconnectClient: (socketId: string) => {
+      eventEmitter.emit('disconnectClient', { socketId })
     },
     
     getOnlinePlayers: () => {
@@ -445,48 +442,33 @@ function handleMpcRequest(
   command: string,
   args: any[],
   requestId: string
-) {
-  const target = modules.get(targetModule)
-  if (!target) {
-    warn(`MPC target module "${targetModule}" not found`)
-    return
-  }
-  
-  const handler = target.handlers.get('mpc')
-  if (handler) {
-    try {
-      const result = handler.apply(null, [command, ...args])
-      
-      const sourceModule = modules.get(fromModule)
-      if (sourceModule) {
-        sourceModule.eventEmitter.emit('mpcResponse', { requestId, result })
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const target = modules.get(targetModule)
+    if (!target) {
+      warn(`MPC target module "${targetModule}" not found`)
+      reject(new Error(`Module "${targetModule}" not found`))
+      return
+    }
+    
+    const handler = target.handlers.get('mpc')
+    if (handler) {
+      try {
+        const result = handler.apply(null, [command, ...args])
+        
+        if (result instanceof Promise) {
+          result.then(resolve).catch(reject)
+        } else {
+          resolve(result)
+        }
+      } catch (error) {
+        warn(`Error handling MPC request in module ${targetModule}: ${error}`)
+        reject(error)
       }
-    } catch (error) {
-      warn(`Error handling MPC request in module ${targetModule}: ${error}`)
+    } else {
+      reject(new Error(`No MPC handler found in module "${targetModule}"`))
     }
-  }
-}
-
-function handleModuleMessage(
-  moduleName: string,
-  to: string,
-  message: any,
-  shardKey?: string
-) {
-  const targetModule = modules.get(to)
-  if (!targetModule) {
-    warn(`Message target module "${to}" not found`)
-    return
-  }
-
-  const handler = targetModule.handlers.get('message')
-  if (handler) {
-    try {
-      handler({ from: moduleName, message, shardKey })
-    } catch (error) {
-      warn(`Error handling message in module ${to}: ${error}`)
-    }
-  }
+  })
 }
 
 function sendToTargetedClient(clientId: string, message: any) {
@@ -518,6 +500,20 @@ function broadcastToAllClients(message: any) {
   }
 }
 
+function disconnectTargetedClient(socketId: string) {
+  const { getOnlineClients } = require('../index')
+  const wsOnlineClients = getOnlineClients() as Set<any>
+  
+  for (const client of wsOnlineClients) {
+    if (client.id === socketId) {
+      client.close(1000, JSON.stringify({
+        reason: 'Disconnected by server module'
+      }))
+      break
+    }
+  }
+}
+
 function notifyModulesOfClientEvent(eventType: string, payload: any) {
   for (const [moduleName, moduleContext] of modules) {
     const handler = moduleContext.handlers.get(eventType)
@@ -537,6 +533,10 @@ export function notifyClientConnect(clientId: string) {
 
 export function notifyClientDisconnect(clientId: string) {
   notifyModulesOfClientEvent('clientDisconnect', { clientId })
+}
+
+export function disconnectClient(socketId: string) {
+  disconnectTargetedClient(socketId)
 }
 
 function callModuleUnloadHandler(moduleContext: ModuleContext, moduleName: string) {
