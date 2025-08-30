@@ -8,6 +8,7 @@ import {
   createUserAccount,
   updateUserLogin
 } from '../db/auth'
+import { getBanByUserId } from '../db/bans'
 import {
   Validator,
   validatePresence,
@@ -39,6 +40,27 @@ export async function authMiddleware(
     const user = await userByToken(token)
     if (!user)
       return next()
+
+    const activeBan = await getBanByUserId(user.id)
+    if (activeBan) {
+      const banMessage = activeBan.permaban 
+        ? `Your account has been permanently banned. Reason: ${activeBan.reason}`
+        : `Your account is banned until ${new Date(activeBan.expiresAt).toLocaleString()}. Reason: ${activeBan.reason}`
+      
+      return res.status(403).json({
+        error: 'accountBanned',
+        text: banMessage,
+        ban: {
+          reason: activeBan.reason,
+          bannedAt: activeBan.bannedAt || activeBan.bannedat,
+          bannedBy: activeBan.bannedBy || activeBan.bannedby,
+          permaban: activeBan.permaban || false,
+          expiresAt: activeBan.permaban
+            ? null
+            : activeBan.expiresAt || activeBan.expiresat
+        }
+      })
+    }
 
     ;(req as any).user = {
       ...user,
@@ -113,6 +135,27 @@ authRouter.post('/login', async (req, res): Promise<any> => {
     return res.status(401).json({
       error: 'invalidCredentials',
       text: 'Invalid username or password'
+    })
+  }
+
+  const activeBan = await getBanByUserId(user.id)
+  if (activeBan) {
+    const banMessage = activeBan.permaban 
+      ? `Your account has been permanently banned. Reason: ${activeBan.reason}`
+      : `Your account is banned until ${new Date(activeBan.expiresAt).toLocaleString()}. Reason: ${activeBan.reason}`
+    
+    return res.status(403).json({
+      error: 'accountBanned',
+      text: banMessage,
+      ban: {
+        reason: activeBan.reason,
+        bannedAt: activeBan.bannedAt || activeBan.bannedat,
+        bannedBy: activeBan.bannedBy || activeBan.bannedby,
+        permaban: activeBan.permaban || false,
+        expiresAt: activeBan.permaban
+          ? null
+          : activeBan.expiresAt || activeBan.expiresat
+      }
     })
   }
   

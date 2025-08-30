@@ -7,6 +7,7 @@ import {
   updateUserLoginById,
   userByEmail
 } from '../db/auth'
+import { getBanByUserId } from '../db/bans'
 import { sql } from '../db/db'
 
 const oauth2Router = Router()
@@ -49,6 +50,28 @@ async function registerUserOAuth2(email: string, provider: string, providerId: s
 }
 
 async function loginUserOAuth2(user: any, ip: string) {
+  const activeBan = await getBanByUserId(user.id)
+  if (activeBan) {
+    const banMessage = activeBan.permaban 
+      ? `Your account has been permanently banned. Reason: ${activeBan.reason}`
+      : `Your account is banned until ${new Date(activeBan.expiresAt).toLocaleString()}. Reason: ${activeBan.reason}`
+    
+    return {
+      ok: false,
+      error: 'accountBanned',
+      text: banMessage,
+      ban: {
+        reason: activeBan.reason,
+        bannedAt: activeBan.bannedAt || activeBan.bannedat,
+        bannedBy: activeBan.bannedBy || activeBan.bannedby,
+        permaban: activeBan.permaban || false,
+        expiresAt: activeBan.permaban
+          ? null
+          : activeBan.expiresAt || activeBan.expiresat
+      }
+    }
+  }
+
   const secretKey = process.env.SECRET_KEY || ''
   const payload = { username: user.username, ip }
   const token = sign(payload, secretKey, { expiresIn: '12h' })
@@ -143,6 +166,10 @@ oauth2Router.post('/google/device/poll', async (req, res): Promise<any> => {
       ip
     )
 
+    if (!result.ok) {
+      return res.status(403).json(result)
+    }
+
     return res.json(result)
   } catch (err) {
     error(`Google device OAuth2 error: ${err}`)
@@ -216,6 +243,10 @@ oauth2Router.post('/google/web/callback', async (req, res): Promise<any> => {
     const userData = await fetchGoogleUserInfo(tokenData.access_token)
     const result = await handleOAuth2User(userData.email, 'google_web', userData.id, ip)
 
+    if (!result.ok) {
+      return res.status(403).json(result)
+    }
+    
     return res.json(result)
   } catch (err) {
     error(`Google OAuth2 error: ${err}`)
@@ -275,6 +306,10 @@ oauth2Router.post('/discord/web/callback', async (req, res): Promise<any> => {
     const tokenData = await exchangeDiscordCode(code, redirectUrl)
     const userData = await fetchDiscordUserInfo(tokenData.access_token)
     const result = await handleOAuth2User(userData.email, 'discord_web', userData.id, ip)
+
+    if (!result.ok) {
+      return res.status(403).json(result)
+    }
 
     return res.json(result)
   } catch (err) {

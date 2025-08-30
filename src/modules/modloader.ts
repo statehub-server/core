@@ -7,6 +7,9 @@ import { EventEmitter } from 'events'
 import { log, warn, error, fatal } from '../logger'
 import { sql } from '../db/db'
 import { getOnlinePlayersMap } from '../utils/player-tracker'
+import { getUserById, getUserByUsername, grantPermissions as dbGrantPermissions, ungrantPermissions as dbUngrantPermissions } from '../db/users'
+import { userByEmail } from '../db/auth'
+import { banUserById, banUserByName, banUserByEmail, unbanUserById, unbanUserByName, unbanUserByEmail, getBanByUserId } from '../db/bans'
 
 interface ModuleManifest {
   name: string
@@ -380,6 +383,186 @@ function createStatehubAPI(
     },
     
     getDatabase: () => sql,
+    
+    getUserById: async (userId: string) => {
+      try {
+        return await getUserById(userId)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to get user by ID: ${err}`)
+        throw err
+      }
+    },
+    
+    getUserByName: async (username: string) => {
+      try {
+        return await getUserByUsername(username)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to get user by name: ${err}`)
+        throw err
+      }
+    },
+    
+    getUserByEmail: async (email: string) => {
+      try {
+        return await userByEmail(email)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to get user by email: ${err}`)
+        throw err
+      }
+    },
+    
+    banUserById: async (
+      userId: string,
+      reason: string,
+      bannedBy?: string,
+      expiresAt?: Date,
+      permanent?: boolean
+    ) => {
+      try {
+        return await banUserById(userId, reason, bannedBy, expiresAt, permanent)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to ban user by ID: ${err}`)
+        throw err
+      }
+    },
+    
+    banUserByName: async (
+      username: string,
+      reason: string,
+      bannedBy?: string,
+      expiresAt?: Date,
+      permanent?: boolean
+    ) => {
+      try {
+        return await banUserByName(username, reason, bannedBy, expiresAt, permanent)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to ban user by name: ${err}`)
+        throw err
+      }
+    },
+    
+    banUserByEmail: async (
+      email: string,
+      reason: string,
+      bannedBy?: string,
+      expiresAt?: Date,
+      permanent?: boolean
+    ) => {
+      try {
+        return await banUserByEmail(email, reason, bannedBy, expiresAt, permanent)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to ban user by email: ${err}`)
+        throw err
+      }
+    },
+    
+    unbanUserById: async (userId: string) => {
+      try {
+        return await unbanUserById(userId)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to unban user by ID: ${err}`)
+        throw err
+      }
+    },
+    
+    unbanUserByName: async (username: string) => {
+      try {
+        return await unbanUserByName(username)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to unban user by name: ${err}`)
+        throw err
+      }
+    },
+    
+    unbanUserByEmail: async (email: string) => {
+      try {
+        return await unbanUserByEmail(email)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to unban user by email: ${err}`)
+        throw err
+      }
+    },
+    
+    getBanStatus: async (userId: string) => {
+      try {
+        return await getBanByUserId(userId)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to get ban status: ${err}`)
+        throw err
+      }
+    },
+    
+    kickUserById: async (userId: string) => {
+      try {
+        const players = getOnlinePlayersMap()
+        for (const [socketId, player] of players) {
+          if (player.userId === userId) {
+            eventEmitter.emit('disconnectClient', { socketId })
+            log(`Module ${manifest.name} kicked user ${userId}`)
+            return true
+          }
+        }
+        return false
+      } catch (err) {
+        error(`Module ${manifest.name} failed to kick user by ID: ${err}`)
+        throw err
+      }
+    },
+    
+    kickUserByName: async (username: string) => {
+      try {
+        const players = getOnlinePlayersMap()
+        for (const [socketId, player] of players) {
+          if (player.username === username) {
+            eventEmitter.emit('disconnectClient', { socketId })
+            log(`Module ${manifest.name} kicked user ${username}`)
+            return true
+          }
+        }
+        return false
+      } catch (err) {
+        error(`Module ${manifest.name} failed to kick user by name: ${err}`)
+        throw err
+      }
+    },
+    
+    kickUserByEmail: async (email: string) => {
+      try {
+        const user = await userByEmail(email)
+        if (!user) return false
+        
+        const players = getOnlinePlayersMap()
+        for (const [socketId, player] of players) {
+          if (player.userId === user.id) {
+            eventEmitter.emit('disconnectClient', { socketId })
+            log(`Module ${manifest.name} kicked user ${email}`)
+            return true
+          }
+        }
+        return false
+      } catch (err) {
+        error(`Module ${manifest.name} failed to kick user by email: ${err}`)
+        throw err
+      }
+    },
+    
+    grantUserPermissions: async (userId: string, permissions: string[]) => {
+      try {
+        return await dbGrantPermissions(userId, permissions)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to grant permissions: ${err}`)
+        throw err
+      }
+    },
+    
+    revokeUserPermissions: async (userId: string, permissions: string[]) => {
+      try {
+        return await dbUngrantPermissions(userId, permissions)
+      } catch (err) {
+        error(`Module ${manifest.name} failed to revoke permissions: ${err}`)
+        throw err
+      }
+    },
     
     log: (message: string) => {
       log(`${message}`, 'info', manifest.name)

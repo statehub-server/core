@@ -11,6 +11,7 @@ import { exitIfDbConnectionFailed, migrateDb } from './db/db'
 import authRouter, { authMiddleware } from './routes/auth'
 import oauth2Router from './routes/oauth2'
 import serverInfoRouter from './routes/server-info'
+import usersRouter from './routes/users'
 import {
   modules,
   loadAllModules,
@@ -72,6 +73,7 @@ app.use(express.json({ limit: '8mb' }))
 app.use('/auth', authRouter)
 app.use('/oauth', oauth2Router)
 app.use('/server', serverInfoRouter)
+app.use('/users', usersRouter)
 onRegisterModuleNamespaceRouter((namespace, router) => {
   app.use(`${namespace}`, authMiddleware, router)
 })
